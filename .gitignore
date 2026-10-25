@@ -1,0 +1,15 @@
+# Node（docx 生成依赖，可由 package.json 重装）
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 渲染与临时中间产物
+render/
+*.tmp
+
+# 系统文件
+Thumbs.db
+.DS_Store
