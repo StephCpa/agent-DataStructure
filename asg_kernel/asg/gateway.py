@@ -534,16 +534,41 @@ class Gateway:
             return None
         ws, iid, token = claim["workspace_id"], claim["intent_id"], claim["token"]
 
-        # 已确定的意图不再重入：迟到的调度与查询错误不得改变终态（评审反例）
+        # 已确定的意图不再重入执行，但矛盾的新证据必须显式保留冲突（E605），
+        # 不能静默丢弃（评审轨迹：对账返回未生效而回执已确认成功）。
         eff = self.conn.execute(
             "SELECT state FROM effect_state WHERE workspace_id=? AND intent_id=?",
             (ws, iid),
         ).fetchone()
         if eff and eff["state"] in ("CONFIRMED_SUCCEEDED", "CONFIRMED_NOT_APPLIED",
                                     "CANCELLED_BEFORE_DISPATCH"):
+            payload, _ = _load_intent(self.conn, ws, iid)
+            contract = payload.get("idempotency_contract") or {}
+            mode = contract.get("mode", "NONE")
+            key = contract.get("key")
+            fresh = None
+            if mode == "KEYED" and key and connector.contract.mode == "KEYED":
+                fresh = connector.query_by_key(key)
+            contradicts = (
+                (eff["state"] == "CONFIRMED_SUCCEEDED"
+                 and fresh and fresh.get("outcome") not in (None, "CONFIRMED_SUCCEEDED"))
+                or (eff["state"] == "CONFIRMED_NOT_APPLIED"
+                    and fresh and fresh.get("outcome") == "CONFIRMED_SUCCEEDED")
+            )
             with write_txn(self.conn) as conn:
+                if contradicts:
+                    conn.execute(
+                        "UPDATE effect_state SET unresolved_reason=? WHERE workspace_id=?"
+                        " AND intent_id=?",
+                        (f"receipt_conflict: 终态 {eff['state']} 与对账结果"
+                         f" {fresh.get('outcome')} 矛盾，保留冲突不覆盖", ws, iid),
+                    )
                 conn.execute("UPDATE effect_outbox SET state='DONE', claim_token=NULL"
                              " WHERE intent_id=?", (iid,))
+            if contradicts:
+                raise AsgError("E605", "对账结果与已确认状态矛盾，保留冲突并对账",
+                               details={"state": eff["state"],
+                                        "reconcile_outcome": fresh.get("outcome")})
             return {"intent_id": iid, "state": eff["state"], "terminal": True}
 
         pending = self.conn.execute(
