@@ -104,13 +104,19 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
     # 探索检索走闸门但不阻断：显式标注陈旧
     gate = read_gate(conn, workspace_id, required_ids + candidate_ids, purpose="exploratory")
 
-    m_units, omitted_filter = [], []
+    m_units, omitted_filter, missing_required = [], [], []
     for rid in required_ids + candidate_ids:
         unit = binding_unit(conn, workspace_id, rid)
         if unit is None:
             omitted_filter.append({"record_id": rid, "reason": "not_readable_or_applicable"})
+            if rid in required_ids:
+                missing_required.append(rid)
         elif rid in required_ids:
             m_units.append(unit)
+    if missing_required:
+        # 必需项不可用：上下文不完整，显式失败（评审反例：purge 后投影仍成功返回空）
+        raise AsgError("E705", "必需上下文项不可用，上下文不完整，动作应暂停",
+                       details={"missing_required": missing_required})
     m_cost = sum(u["token_cost"] for u in m_units)
     if m_cost > token_budget:
         raise AsgError(
@@ -163,7 +169,7 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
         "policy_domain": "default",
         "payload": manifest_payload,
         "typed_refs": [{"role": "selected_into", "target_record_id": rid}
-                       for rid in required_ids],
+                       for rid in dict.fromkeys(required_ids + candidate_ids)],
         "prior_revision_ids": [],
     }
     head = conn.execute(

@@ -139,11 +139,28 @@ class Gateway:
                 "effect_state": "PREPARED", "reservations": reservation_ids}
 
     def _check_preconditions(self, conn, workspace_id: str, intent_payload: dict) -> None:
-        """E401 闸门（7.3 节 read_gate：critical 目的，投影落后或前提命中即拒绝）。"""
+        """动作准入闸门：传播水位（7.3）与前提语义（评审收敛）必须同时满足。
+
+        水位追上只说明更新已被处理；前提成立是另一次语义判断：
+        CLAIM 前提要求正向支持成立且无合格反证（CONTESTED 默认不满足动作前提，
+        放宽由动作策略显式声明）；其他前提要求记录仍可作为输入（未被撤回或删除）。
+        """
+        from .evidence import eligible, evaluate_support
         preconds = intent_payload.get("precondition_refs", [])
         if not preconds:
             return
         read_gate(conn, workspace_id, preconds, purpose="critical")
+        for pid in preconds:
+            row = conn.execute("SELECT kind FROM record WHERE record_id=?", (pid,)).fetchone()
+            if row is None:
+                raise AsgError("E401", "前置记录不存在", details={"missing": pid})
+            if row["kind"] == "CLAIM":
+                ev = evaluate_support(conn, workspace_id, pid)
+                if not (ev["supported"] and not ev["refuted"]):
+                    raise AsgError("E401", "主张前提当前不成立（无合格正向支持或存在反证）",
+                                   details={"claim": pid, "four_state": ev["four_state"]})
+            elif not eligible(conn, workspace_id, pid):
+                raise AsgError("E401", "前置证据已撤回、失效或删除", details={"record": pid})
 
     # ── 7.6 outbox：领取 / 尝试 / 回执 / 聚合 ───────────
     def claim(self, intent_id: str | None = None, lease_seconds: float = 30.0) -> dict | None:
@@ -348,6 +365,12 @@ class Gateway:
 
     # ── 6.1 聚合：按意图聚合回执并结算预留 ──────────────
     def _aggregate_in_txn(self, conn, workspace_id: str, intent_id: str) -> str:
+        """按 Attempt 聚合（评审收敛：先对每个 Attempt 归约其回执，再合成意图状态）。
+
+        归约规则：确认成功优先于未生效；仅未知时为未知；同一尝试同时存在
+        确认成功与确认未生效为显式冲突（E605 语义，保留不覆盖）。
+        历史未知回执不永久等同当前未知：后续确定回执可消解。
+        """
         attempts = conn.execute(
             "SELECT * FROM attempt WHERE intent_id=? ORDER BY started_at, rowid",
             (intent_id,),
@@ -358,34 +381,48 @@ class Gateway:
         ).fetchone()
         current = cur["state"] if cur else "PREPARED"
 
-        receipts_by_outcome: dict[str, list[dict]] = {"CONFIRMED_SUCCEEDED": [],
-                                                      "CONFIRMED_NOT_APPLIED": [],
-                                                      "OUTCOME_UNKNOWN": [], "PARTIAL": []}
-        attempts_with_receipt: set[str] = set()
+        # 回执仅采信可信签发者（CP-1）：普通提案伪造的回执不参与聚合
+        per_attempt: dict[str, set[str]] = {}
         for att in attempts:
             rows = conn.execute(
-                "SELECT payload FROM record WHERE kind='RECEIPT' AND"
+                "SELECT payload, authenticated_writer FROM record WHERE kind='RECEIPT' AND"
                 " json_extract(payload, '$.attempt_id')=?", (att["attempt_id"],),
             ).fetchall()
+            outcomes = set()
             for r in rows:
+                writer = json.loads(r["authenticated_writer"])
+                if writer.get("kind") not in ("service", "policy-service"):
+                    continue  # 非可信签发的回执忽略（审计保留，不驱动结算）
                 p = json.loads(r["payload"])
-                if p["outcome"] in receipts_by_outcome:
-                    receipts_by_outcome[p["outcome"]].append(p)
-                attempts_with_receipt.add(att["attempt_id"])
+                outcomes.add(p["outcome"])
+            per_attempt[att["attempt_id"]] = outcomes
 
+        def reduce_attempt(outcomes: set[str]) -> str:
+            if not outcomes:
+                return "PENDING"
+            det = outcomes & {"CONFIRMED_SUCCEEDED", "CONFIRMED_NOT_APPLIED"}
+            if len(det) > 1:
+                return "CONFLICT"
+            if "CONFIRMED_SUCCEEDED" in outcomes:
+                return "SUCCEEDED"
+            if "PARTIAL" in outcomes:
+                return "PARTIAL"
+            if "CONFIRMED_NOT_APPLIED" in outcomes:
+                return "NOT_APPLIED"
+            return "UNKNOWN"
+
+        reduced = {aid: reduce_attempt(o) for aid, o in per_attempt.items()}
         unresolved = None
-        if receipts_by_outcome["CONFIRMED_SUCCEEDED"]:
-            # 已确认成功不被迟到回执覆盖；冲突保留并对账（E605 语义）
-            if current == "CONFIRMED_SUCCEEDED" and len(
-                    {p["attempt_id"] for p in receipts_by_outcome["CONFIRMED_SUCCEEDED"]}) > 1:
-                unresolved = "receipt_conflict: 多个尝试声称成功，保留冲突并对账"
+        if any(v == "CONFLICT" for v in reduced.values()):
+            unresolved = "receipt_conflict: 同一尝试存在相互矛盾的确定性回执，保留冲突并对账"
+            new_state = current if current == "CONFIRMED_SUCCEEDED" else "OUTCOME_UNKNOWN"
+        elif any(v == "SUCCEEDED" for v in reduced.values()):
+            # 已确认成功不被迟到回执覆盖（I7 的反向约束）
             new_state = "CONFIRMED_SUCCEEDED"
-        elif receipts_by_outcome["PARTIAL"]:
+        elif any(v == "PARTIAL" for v in reduced.values()):
             new_state = "PARTIAL"
-        elif attempts and all(a["attempt_id"] in attempts_with_receipt for a in attempts) \
-                and receipts_by_outcome["CONFIRMED_NOT_APPLIED"] \
-                and not receipts_by_outcome["OUTCOME_UNKNOWN"]:
-            # 释放守卫：全部可能送达的尝试均确认未生效且无在途/未知尝试
+        elif reduced and all(v == "NOT_APPLIED" for v in reduced.values()):
+            # 释放守卫：全部可能送达的尝试均确认未生效
             new_state = "CONFIRMED_NOT_APPLIED"
         else:
             new_state = "OUTCOME_UNKNOWN"
@@ -461,6 +498,9 @@ class Gateway:
             if connector.contract.final_query_guarantee:
                 response = {"outcome": "CONFIRMED_NOT_APPLIED", "external_job_id": None,
                             "clause": f"{basis}: 契约保证查询覆盖范围、可见性与最终性，查无即未生效"}
+            elif mode == "NONE":
+                # 无幂等契约且无法对账：自动重发本身被禁止（E604），不是查询不完整（E606）
+                raise AsgError("E604", "无幂等契约且无法对账，默认暂停自动重发")
             else:
                 raise AsgError("E606", "查询不满足覆盖/可见性/最终性，查无不能作为未生效依据，维持 UNKNOWN")
 
@@ -494,11 +534,36 @@ class Gateway:
             return None
         ws, iid, token = claim["workspace_id"], claim["intent_id"], claim["token"]
 
+        # 已确定的意图不再重入：迟到的调度与查询错误不得改变终态（评审反例）
+        eff = self.conn.execute(
+            "SELECT state FROM effect_state WHERE workspace_id=? AND intent_id=?",
+            (ws, iid),
+        ).fetchone()
+        if eff and eff["state"] in ("CONFIRMED_SUCCEEDED", "CONFIRMED_NOT_APPLIED",
+                                    "CANCELLED_BEFORE_DISPATCH"):
+            with write_txn(self.conn) as conn:
+                conn.execute("UPDATE effect_outbox SET state='DONE', claim_token=NULL"
+                             " WHERE intent_id=?", (iid,))
+            return {"intent_id": iid, "state": eff["state"], "terminal": True}
+
         pending = self.conn.execute(
             "SELECT attempt_id FROM attempt WHERE intent_id=? AND attempt_status IN"
-            " ('STARTED','NO_RESPONSE')", (iid,),
+            " ('STARTED','NO_RESPONSE','RESPONSE_PERSISTED')", (iid,),
         ).fetchall()
-        if pending:
+        # 效果已确定的意图不因历史未决尝试重入（UNKNOWN 才需要对账）
+        eff = self.conn.execute(
+            "SELECT state FROM effect_state WHERE workspace_id=? AND intent_id=?",
+            (ws, iid),
+        ).fetchone()
+        needs_reconcile = pending and (eff is None or eff["state"] in
+                                        ("IN_FLIGHT", "OUTCOME_UNKNOWN", "PARTIAL"))
+        if needs_reconcile:
+            payload, _ = _load_intent(self.conn, ws, iid)
+            mode = (payload.get("idempotency_contract") or {}).get("mode", "NONE")
+            if mode == "NONE":
+                # 无幂等契约的自动重发默认禁止（E604）：不进入对账/重发路径
+                self._abandon_keep(ws, iid, "E604 无幂等契约，暂停自动重发")
+                return {"intent_id": iid, "state": "OUTCOME_UNKNOWN", "reason": "E604"}
             try:
                 state = self.reconcile(ws, iid, connector)
             except AsgError as e:
@@ -541,8 +606,25 @@ class Gateway:
             state = self.record_response(workspace_id, ctx["attempt_id"], response)
         return {"intent_id": intent_id, "attempt_id": ctx["attempt_id"], "state": state}
 
-    def _mark_unknown_keep(self, workspace_id: str, intent_id: str, reason: str) -> None:
+    def _abandon_keep(self, workspace_id: str, intent_id: str, reason: str) -> None:
+        """事务外的放弃路径：落 ABANDONED 与 UNKNOWN，保留占用（E604）。"""
         with write_txn(self.conn) as conn:
+            self._abandon_in_txn(conn, workspace_id, intent_id, reason)
+
+    def _mark_unknown_keep(self, workspace_id: str, intent_id: str, reason: str) -> None:
+        """对账暂不可得：维持 UNKNOWN，但不得覆盖已确认的确定性结果。"""
+        with write_txn(self.conn) as conn:
+            cur = conn.execute(
+                "SELECT state FROM effect_state WHERE workspace_id=? AND intent_id=?",
+                (workspace_id, intent_id),
+            ).fetchone()
+            if cur and cur["state"] in ("CONFIRMED_SUCCEEDED", "CONFIRMED_NOT_APPLIED"):
+                # 迟到的查询错误不能抹去已确认结果（评审反例：E606 覆盖成功）
+                conn.execute(
+                    "UPDATE effect_outbox SET claim_token=NULL, last_error=? WHERE intent_id=?",
+                    (reason, intent_id),
+                )
+                return
             for att in conn.execute(
                 "SELECT attempt_id FROM attempt WHERE intent_id=? AND attempt_status='STARTED'",
                 (intent_id,),

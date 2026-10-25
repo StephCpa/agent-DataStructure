@@ -14,7 +14,7 @@ import json
 from datetime import datetime, timezone
 
 from .errors import AsgError
-from .ids import uuid7
+from .ids import digest_obj, uuid7
 from .storage import write_txn
 
 
@@ -65,13 +65,33 @@ class Purger:
                     "SELECT policy_epoch FROM workspace_epoch WHERE workspace_id=?",
                     (workspace_id,)).fetchone()["policy_epoch"]
                 for t in targets:
+                    # 墓碑按稳定内容身份登记（来源+片段），与复活检查同一口径
+                    p = json.loads(t["payload"]) if t["kind"] == "OBSERVATION" else None
+                    content_id = (digest_obj({"source": p.get("source"), "span": p.get("span")})
+                                  if p else t["payload_digest"])
                     conn.execute(
                         "INSERT OR IGNORE INTO tombstone (workspace_id, object_id, record_id,"
                         " payload_digest, policy_domain, mode, purged_at, policy_epoch)"
                         " VALUES (?,?,?,?,?, 'purge', ?, ?)",
-                        (workspace_id, t["object_id"], t["record_id"], t["payload_digest"],
+                        (workspace_id, t["object_id"], t["record_id"], content_id,
                          t["policy_domain"], _now(), pe),
                     )
+                    # 派生副本隔离：显式声明派生自被删记录的在线副本同步墓碑
+                    # （正文再生完成前先隔离，评审反例：派生副本仍可读）
+                    for d in conn.execute(
+                        "SELECT r.record_id, r.object_id, r.payload_digest, r.policy_domain"
+                        " FROM record_ref rr JOIN record r ON r.record_id = rr.src_record_id"
+                        " WHERE rr.dst_record_id=? AND rr.ref_role IN"
+                        " ('derived_from','extracted_from','transcribed_from')",
+                        (t["record_id"],),
+                    ).fetchall():
+                        conn.execute(
+                            "INSERT OR IGNORE INTO tombstone (workspace_id, object_id, record_id,"
+                            " payload_digest, policy_domain, mode, purged_at, policy_epoch)"
+                            " VALUES (?,?,?,?,?, 'purge', ?, ?)",
+                            (workspace_id, d["object_id"], d["record_id"], d["payload_digest"],
+                             d["policy_domain"], _now(), pe),
+                        )
         cleanup = self._cleanup_online(targets) if mode == "purge" else {"blobs": 0}
         return {"commit_id": result["commit_id"], "sequence": result["sequence"],
                 "mode": mode, "targets": [t["record_id"] for t in targets],
@@ -79,14 +99,23 @@ class Purger:
                 if mode == "purge" else []}
 
     def _cleanup_online(self, targets) -> dict:
-        """在线副本清理：墓碑已先行，此处清理 blob 登记态。"""
+        """在线副本清理：墓碑已先行，此处清理目标与其派生副本的 blob 登记态。"""
         n = 0
         for t in targets:
             cur = self.conn.execute(
-                "UPDATE blob_object SET deletion_state='purged' WHERE digest=?",
-                (t["payload_digest"],),
+                "UPDATE blob_object SET deletion_state='purged' WHERE storage_uri=?",
+                ("inline:" + t["record_id"],),
             )
             n += cur.rowcount
+            for d in self.conn.execute(
+                "SELECT src_record_id FROM record_ref WHERE dst_record_id=? AND ref_role IN"
+                " ('derived_from','extracted_from','transcribed_from')", (t["record_id"],),
+            ).fetchall():
+                cur = self.conn.execute(
+                    "UPDATE blob_object SET deletion_state='purged' WHERE storage_uri=?",
+                    ("inline:" + d["src_record_id"],),
+                )
+                n += cur.rowcount
         return {"blobs": n}
 
     def _regeneration_plan(self, workspace_id: str, targets) -> list[dict]:

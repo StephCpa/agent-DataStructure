@@ -52,13 +52,13 @@ class WriteService:
         request_digest = request_digest or digest_obj(records)
         principal = principal or {"kind": "service", "id": "write-service"}
 
-        # 快速路径：事务外先查幂等
+        # 快速路径：事务外先查幂等（摘要由服务计算，调用方传入值仅供比对）
         row = self.conn.execute(
             'SELECT * FROM "commit" WHERE workspace_id=? AND request_id=?',
             (workspace_id, request_id),
         ).fetchone()
         if row is not None:
-            if row["request_digest"] != request_digest:
+            if row["request_digest"] != digest_obj(records):
                 raise AsgError("E202", "同一 request_id 携带不同请求内容，拒绝一键两用",
                                details={"request_id": request_id})
             return self._commit_result(row, replayed=True)
@@ -66,16 +66,34 @@ class WriteService:
         try:
             with write_txn(self.conn) as conn:
                 return self.commit_in_txn(conn, workspace_id, branch_id, records,
-                                           expected_head, request_id, request_digest)
+                                           expected_head, request_id, request_digest,
+                                           principal=principal)
         except _EarlyExit as e:
             return e.result
         except sqlite3.IntegrityError as e:
             raise AsgError("E101", f"约束冲突: {e}") from e
 
     def commit_in_txn(self, conn, workspace_id, branch_id, records, expected_head,
-                       request_id, request_digest: str | None = None) -> dict:
-        """事务内提交：供网关/策略服务在同一事务内组合（5.5 节）。"""
-        request_digest = request_digest or digest_obj(records)
+                       request_id, request_digest: str | None = None,
+                       principal: dict | None = None) -> dict:
+        """事务内提交：供网关/策略服务在同一事务内组合（5.5 节）。
+
+        写入边界契约（评审收敛第一轮）：
+        - 分支：当前仅支持 main，其他 branch_id 显式拒绝（E104）；
+        - 摘要：request_digest 由服务按记录计算，调用方传入值只允许一致比对；
+        - 身份：authenticated_writer 由 principal 回填，调用方自报值仅存 asserted_source；
+        - 签发：GRANT/ATTEMPT/RECEIPT 仅限可信签发者（CP-1，E103）；
+        - 修订基线：supersedes 必须指向该对象当前头（E203）；
+        - 引用：目标须存在且同工作空间（E303 跨域拒绝），prior_revision_ids 同样校验。
+        """
+        if branch_id != "main":
+            raise AsgError("E104", f"分支 {branch_id!r} 尚未支持，当前仅接受 main")
+        computed = digest_obj(records)
+        if request_digest is not None and request_digest != computed:
+            raise AsgError("E202", "请求摘要与记录内容不一致（摘要由服务计算）",
+                           details={"request_id": request_id})
+        request_digest = computed
+        principal = principal or {"kind": "service", "id": "write-service"}
         # 幂等兜底（并发同键写入）
         dup = conn.execute(
             'SELECT * FROM "commit" WHERE workspace_id=? AND request_id=?',
@@ -87,10 +105,13 @@ class WriteService:
                                details={"request_id": request_id})
             raise _EarlyExit(self._commit_result(dup, replayed=True))
 
-        # schema 与类型校验
+        # schema 与类型校验 + 写入边界契约
         for rec in records:
             registry.validate_record(rec)
             registry.validate_kind_phase(rec["kind"])
+            self._enforce_issuer(rec, principal)
+            self._enforce_revision_baseline(conn, workspace_id, rec)
+            self._enforce_refs(conn, workspace_id, rec)
 
         ws = conn.execute(
             "SELECT * FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
@@ -166,26 +187,31 @@ class WriteService:
                 " payload_digest, payload, policy_domain, commit_id, sequence)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (rec["record_id"], rec["object_id"], workspace_id, branch_id, rec["kind"],
-                 rec["schema_version"], json.dumps(rec["authenticated_writer"]),
+                 rec["schema_version"], json.dumps(principal),
                  json.dumps(rec["asserted_source"]) if rec.get("asserted_source") else None,
                  recorded_at, digest_obj(rec["payload"]), payload_json,
                  rec["policy_domain"], commit_id, seq),
             )
             if rec["kind"] == "OBSERVATION":
-                # 删除域复活阻止（I10 / 7.8 节）：同内容观察命中墓碑即拒绝
-                pd = digest_obj(rec["payload"])
+                # 删除域复活阻止（I10 / 7.8 节）：按稳定内容身份比对（来源 + 片段），
+                # 采集时间等会自然变化的元数据不参与——否则改 acquired_at 即可绕过
+                content_id = digest_obj({
+                    "source": rec["payload"].get("source"),
+                    "span": rec["payload"].get("span"),
+                })
                 hit = conn.execute(
-                    "SELECT 1 FROM tombstone WHERE payload_digest=? AND mode='purge'", (pd,)
+                    "SELECT 1 FROM tombstone WHERE payload_digest=? AND mode='purge'",
+                    (content_id,),
                 ).fetchone()
                 if hit is not None:
                     raise AsgError("E802", "观察内容命中删除域墓碑，阻止复活",
-                                   details={"payload_digest": pd})
+                                   details={"content_identity": content_id})
                 # 对象登记：正文纳入删除域管理（9.4 节删除域清单）
                 payload_json_c = json.dumps(rec["payload"], ensure_ascii=False)
                 conn.execute(
                     "INSERT OR IGNORE INTO blob_object (blob_id, digest, media_type, size_bytes,"
                     " storage_uri, deletion_state, data_labels) VALUES (?,?,?,?,?,'live','[]')",
-                    ("blob-" + uuid7(), pd,
+                    ("blob-" + uuid7(), digest_obj(rec["payload"]),
                      "application/x-asg-observation+" + str(rec["payload"].get("modality", "text")),
                      len(payload_json_c), "inline:" + rec["record_id"]),
                 )
@@ -237,6 +263,50 @@ class WriteService:
             "SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
         ).fetchone()
         return row["head_sequence"] if row else 0
+
+    # ── 写入边界契约（评审收敛第一轮） ─────────────────
+    # 可信签发者：仅这些主体可签发 Grant/Attempt/Receipt（CP-1，第 2.3 节信任边界）
+    TRUSTED_ISSUER_KINDS = {"service", "policy-service", "human"}
+    TRUSTED_KINDS = {"GRANT", "ATTEMPT", "RECEIPT"}
+
+    def _enforce_issuer(self, rec: dict, principal: dict) -> None:
+        if rec["kind"] in self.TRUSTED_KINDS and principal.get("kind") not in self.TRUSTED_ISSUER_KINDS:
+            raise AsgError("E103", f"主体 {principal.get('kind')} 不被允许签发 {rec['kind']}")
+
+    def _enforce_revision_baseline(self, conn, workspace_id: str, rec: dict) -> None:
+        """supersedes 必须指向该对象当前头；全局 expected_head 不能替代对象级基线（I4）。"""
+        supersedes = [r["target_record_id"] for r in rec.get("typed_refs", [])
+                      if r.get("role") == "supersedes"]
+        if not supersedes:
+            return
+        head = conn.execute(
+            "SELECT head_record_id FROM object_heads WHERE workspace_id=? AND object_id=?",
+            (workspace_id, rec["object_id"]),
+        ).fetchone()
+        if head is None or head["head_record_id"] not in supersedes:
+            raise AsgError("E203", "修订基线与当前头不一致（supersedes 须指向对象当前版本）",
+                           details={"expected": supersedes,
+                                    "current": head["head_record_id"] if head else None})
+
+    def _enforce_refs(self, conn, workspace_id: str, rec: dict) -> None:
+        """引用与父版本校验：父版本（prior_revision_ids）必须已存在（E301）；
+        一切引用不得跨工作空间（E303）。typed_refs 的存在性与批内拓扑由后续步骤校验。"""
+        for tid in rec.get("prior_revision_ids", []):
+            row = conn.execute(
+                "SELECT workspace_id FROM record WHERE record_id=?", (tid,)
+            ).fetchone()
+            if row is None:
+                raise AsgError("E301", f"父版本记录不存在: {tid}")
+            if row["workspace_id"] != workspace_id:
+                raise AsgError("E303", f"父版本跨工作空间: {tid}")
+        for ref in rec.get("typed_refs", []):
+            row = conn.execute(
+                "SELECT workspace_id FROM record WHERE record_id=?", (ref["target_record_id"],)
+            ).fetchone()
+            if row is not None and row["workspace_id"] != workspace_id:
+                raise AsgError("E303", f"引用跨工作空间：{ref['target_record_id']} 不属于 {workspace_id}",
+                               details={"target": ref["target_record_id"],
+                                        "target_workspace": row["workspace_id"]})
 
     def _upsert_head(self, conn, workspace_id: str, rec: dict, seq: int, at: str) -> None:
         cur = conn.execute(

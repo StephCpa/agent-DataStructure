@@ -43,7 +43,10 @@ def justify(svc, workspace_id: str, claim_record_id: str,
     }
     refs = ([{"role": "supports", "target_record_id": m} for g in support_groups for m in g]
             + [{"role": "refutes", "target_record_id": m} for g in refute for m in g]
-            + [{"role": "uses_version", "target_record_id": r} for r in (rule_refs or [])])
+            + [{"role": "uses_version", "target_record_id": r} for r in (rule_refs or [])]
+            # 假设与目标主张也入引用图：撤回它们时失效传播能到达本论证（7.3 节）
+            + [{"role": "uses_version", "target_record_id": a} for a in (assumption_refs or [])]
+            + [{"role": "supports", "target_record_id": claim_record_id}])
     record = {
         "workspace_id": workspace_id,
         "object_id": "just-" + uuid7(),
@@ -94,9 +97,15 @@ def _purged(conn, record_id: str) -> bool:
     ).fetchone() is not None
 
 
-def eligible(conn, workspace_id: str, record_id: str, as_of: int | None = None) -> bool:
-    """证据资格：版本存在于 as_of 之前，未被撤回（根失效）、未被标记、未被删除。"""
-    row = conn.execute("SELECT sequence FROM record WHERE record_id=?", (record_id,)).fetchone()
+def eligible(conn, workspace_id: str, record_id: str, as_of: int | None = None,
+             _stack: tuple = ()) -> bool:
+    """证据资格：版本存在于 as_of 之前，未被撤回/标记/删除。
+
+    主张成员递归求值：作为支持成员的 Claim 只有自身正向支持成立才合格
+    （评审反例：O→C1→C2 撤回 O 后 C2 仍 SUPPORTED）。循环引用不凭空产生支持。
+    """
+    row = conn.execute("SELECT sequence, kind FROM record WHERE record_id=?",
+                       (record_id,)).fetchone()
     if row is None:
         return False
     if as_of is not None and row["sequence"] > as_of:
@@ -107,12 +116,23 @@ def eligible(conn, workspace_id: str, record_id: str, as_of: int | None = None) 
         return False
     if _purged(conn, record_id):
         return False
+    if row["kind"] == "CLAIM":
+        if record_id in _stack:  # 循环主张互引用不产生支持（3.6 节）
+            return False
+        ev = evaluate_support(conn, workspace_id, record_id, as_of, _stack=_stack + (record_id,))
+        return ev["supported"] and not ev["refuted"]
     return True
 
 
 def evaluate_support(conn, workspace_id: str, claim_record_id: str,
-                     as_of: int | None = None, budget: dict | None = None) -> dict:
-    """支持电路求值（7.2 节）：合并该主张的全部 Justification（OR of AND）。"""
+                     as_of: int | None = None, budget: dict | None = None,
+                     _stack: tuple = ()) -> dict:
+    """支持电路求值（7.2 节，按论证独立求值）。
+
+    每个 Justification 是独立的逻辑论证：其规则与假设只约束自身的支持组，
+    论证自身被撤回则整条路径退出。不同论证之间为析取（评审反例：
+    撤回 J1 的规则不得使 J2 的独立支持消失；撤回论证自身不得继续提供支持）。
+    """
     b = dict(DEFAULT_BUDGET)
     b.update(budget or {})
     if as_of is None:
@@ -122,38 +142,32 @@ def evaluate_support(conn, workspace_id: str, claim_record_id: str,
         as_of = row["head_sequence"] if row else 0
 
     justs = conn.execute(
-        "SELECT payload FROM record WHERE workspace_id=? AND kind='JUSTIFICATION'"
+        "SELECT record_id, payload FROM record WHERE workspace_id=? AND kind='JUSTIFICATION'"
         " AND sequence<=? AND json_extract(payload, '$.target_claim_id')=?",
         (workspace_id, as_of, claim_record_id),
     ).fetchall()
-    support_groups: list[list[str]] = []
-    refute_groups: list[list[str]] = []
-    rules: list[str] = []
+
+    supporting, refuting, evaluated, truncated = [], [], 0, False
     for j in justs:
         p = json.loads(j["payload"])
-        support_groups.extend(p.get("support_groups") or [])
-        refute_groups.extend(p.get("refute_groups") or [])
-        rules.extend(p.get("rule_refs") or [])
-
-    # 规则全局合取：任一规则失效，其参与的组全部失效（3.6 节）
-    rules_eligible = all(eligible(conn, workspace_id, r, as_of) for r in rules) if rules else True
-
-    def eval_groups(groups):
-        ok_paths, evaluated = [], 0
-        truncated = False
-        for g in groups:
-            if evaluated >= b["max_paths"] or len(g) > b["max_depth"]:
-                # 尚有未展开的组：结果不谎称完整证明（7.2 节预算截断）
-                truncated = True
-                break
-            evaluated += 1
-            if rules_eligible and all(eligible(conn, workspace_id, m, as_of) for m in g):
-                ok_paths.append(list(g))
-        return ok_paths, evaluated, truncated
-
-    supporting, sup_n, t1 = eval_groups(support_groups)
-    refuting, ref_n, t2 = eval_groups(refute_groups)
-    truncated = t1 or t2
+        # 论证自身被撤回：整条路径退出。论证被标记只表示其依赖有变更，
+        # 成员资格在下方逐组重算——标记本身不使全部 OR 分支失效（TC-01 语义）
+        if j["record_id"] in _retired_roots(conn, workspace_id):
+            continue
+        # 规则与假设按论证独立合取（不跨论证合并）
+        prereq_ok = all(eligible(conn, workspace_id, r, as_of, _stack)
+                        for r in (p.get("rule_refs") or []) + (p.get("assumption_refs") or []))
+        if not prereq_ok:
+            continue
+        for groups, bucket in ((p.get("support_groups") or [], supporting),
+                               (p.get("refute_groups") or [], refuting)):
+            for g in groups:
+                if evaluated >= b["max_paths"] or len(g) > b["max_depth"]:
+                    truncated = True  # 超限不谎称完整证明（7.2 节）
+                    break
+                evaluated += 1
+                if all(eligible(conn, workspace_id, m, as_of, _stack) for m in g):
+                    bucket.append(list(g))
 
     s = bool(supporting)
     r = bool(refuting)
@@ -167,7 +181,7 @@ def evaluate_support(conn, workspace_id: str, claim_record_id: str,
         "refuted": r,
         "supporting_paths": supporting,
         "refuting_paths": refuting,
-        "groups_evaluated": sup_n + ref_n,
+        "groups_evaluated": evaluated,
         "truncated": truncated,
         "independent_roots": sorted(roots),
         "independent_root_count": len(roots),

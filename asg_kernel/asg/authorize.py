@@ -106,14 +106,19 @@ class Authorizer:
                 "sequence": result["sequence"]}
 
     def revoke(self, grant_id: str) -> None:
-        """撤销立即影响后续 dispatch；已发出的外部请求无法收回（6.4 节）。"""
+        """撤销立即影响后续 dispatch；已发出的外部请求无法收回（6.4 节）。
+
+        撤销与次数占用是两个维度：次数用尽（exhausted）不关闭撤销路径，
+        未发送的动作仍须能被撤销（评审反例：prepare 后撤销被 E403 拒绝）。
+        """
         with write_txn(self.conn) as conn:
             cur = conn.execute(
-                "UPDATE grant_record SET status='revoked' WHERE grant_id=? AND status='active'",
+                "UPDATE grant_record SET status='revoked' WHERE grant_id=?"
+                " AND status IN ('active','exhausted')",
                 (grant_id,),
             )
             if cur.rowcount == 0:
-                raise AsgError("E403", f"授权不存在或已不在活跃状态: {grant_id}")
+                raise AsgError("E403", f"授权不存在或已终结（过期/已撤销）: {grant_id}")
 
     # ── 校验（CP-2：prepare 与 dispatch 各查一次） ──────
     def check_grant(self, conn: sqlite3.Connection, grant_id: str, intent_payload: dict,
