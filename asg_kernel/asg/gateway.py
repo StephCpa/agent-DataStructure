@@ -38,7 +38,8 @@ class ConnectorContract:
     """连接器能力契约（5.6 节 / 6.2 节）：未声明的能力不得被运行时假设。"""
     mode: str = "NONE"                       # KEYED / QUERY_ONLY / NONE
     supports_job_query: bool = False
-    final_query_guarantee: bool = False      # 查询覆盖范围、可见性与最终性
+    final_query_guarantee: bool = False      # Legacy metadata; never sufficient to release liability
+    supports_attempt_closure: bool = False  # Atomic remote close/query for an exact attempt
 
 
 class Connector:
@@ -54,6 +55,18 @@ class Connector:
         return None
 
     def query_job(self, job_id: str) -> dict | None:
+        return None
+
+    def call_attempt(self, context: dict) -> dict | None:
+        """Closure-capable adapters MUST carry immutable attempt_id to the remote."""
+        return self.call(context["operation"], context["arguments"], context["idempotency_key"])
+
+    def close_attempt(self, key: str, attempt_id: str) -> dict | None:
+        """Atomically establish the effect or permanently forbid this attempt's send.
+
+        None means incomplete evidence. A negative result must name the closed
+        attempt. New attempts may reuse the logical key; closed IDs stay closed.
+        """
         return None
 
 
@@ -156,9 +169,11 @@ class Gateway:
                 raise AsgError("E401", "前置记录不存在", details={"missing": pid})
             if row["kind"] == "CLAIM":
                 ev = evaluate_support(conn, workspace_id, pid)
-                if not (ev["supported"] and not ev["refuted"]):
+                if ev["truncated"] or not (ev["supported"] and not ev["refuted"]):
                     raise AsgError("E401", "主张前提当前不成立（无合格正向支持或存在反证）",
-                                   details={"claim": pid, "four_state": ev["four_state"]})
+                                   details={"claim": pid, "four_state": ev["four_state"],
+                                            "evaluation_status": ev["evaluation_status"],
+                                            "exhausted_budget": ev["exhausted_budget"]})
             elif not eligible(conn, workspace_id, pid):
                 raise AsgError("E401", "前置证据已撤回、失效或删除", details={"record": pid})
 
@@ -225,6 +240,8 @@ class Gateway:
                 "SELECT * FROM attempt WHERE intent_id=?", (intent_id,)
             ).fetchall()
             contract = payload.get("idempotency_contract", {})
+            if len(prior) >= contract.get("retry_policy", {}).get("max", 1):
+                raise AsgError("E604", "Attempt budget exhausted; dispatch forbidden")
             mode = contract.get("mode", "NONE")
             if prior and mode == "NONE":
                 self._abandon_in_txn(conn, workspace_id, intent_id,
@@ -327,6 +344,7 @@ class Gateway:
                 "classification_basis": {
                     "contract_mode": (payload.get("idempotency_contract") or {}).get("mode"),
                     "clause": response.get("clause", "连接器契约条款"),
+                    "closed_attempt_id": response.get("closed_attempt_id"),
                 },
                 "evidence_observation_id": obs_rid,
                 "recorded_by": self.principal,
@@ -494,10 +512,22 @@ class Gateway:
             else:
                 raise AsgError("E606", "无可信对账通道（无幂等键且查询不受支持）")
 
-        if response is None:
-            if connector.contract.final_query_guarantee:
-                response = {"outcome": "CONFIRMED_NOT_APPLIED", "external_job_id": None,
-                            "clause": f"{basis}: 契约保证查询覆盖范围、可见性与最终性，查无即未生效"}
+        if response is None or response.get("outcome") == "CONFIRMED_NOT_APPLIED":
+            if mode == "KEYED" and key and not key_expired and connector.contract.supports_attempt_closure:
+                attempts = self.conn.execute("SELECT attempt_id FROM attempt WHERE intent_id=?"
+                                              " ORDER BY started_at,rowid", (intent_id,)).fetchall()
+                if not attempts:
+                    raise AsgError("E606", "No persisted attempt to close")
+                for attempt in attempts:
+                    aid = attempt["attempt_id"]
+                    closed = connector.close_attempt(key, aid)
+                    if closed is None or closed.get("outcome") not in {
+                            "CONFIRMED_SUCCEEDED", "CONFIRMED_NOT_APPLIED"}:
+                        raise AsgError("E606", "Remote attempt closure is incomplete; retain liability")
+                    if closed["outcome"] == "CONFIRMED_NOT_APPLIED" and closed.get("closed_attempt_id") != aid:
+                        raise AsgError("E606", "Missing exact remote attempt closure evidence")
+                    state = self.record_response(workspace_id, aid, closed)
+                return state
             elif mode == "NONE":
                 # 无幂等契约且无法对账：自动重发本身被禁止（E604），不是查询不完整（E606）
                 raise AsgError("E604", "无幂等契约且无法对账，默认暂停自动重发")
@@ -544,6 +574,10 @@ class Gateway:
                                     "CANCELLED_BEFORE_DISPATCH"):
             payload, _ = _load_intent(self.conn, ws, iid)
             contract = payload.get("idempotency_contract") or {}
+            attempts_count = self.conn.execute("SELECT attempts_count FROM effect_outbox"
+                                                " WHERE intent_id=?", (iid,)).fetchone()[0]
+            retry_due = (eff["state"] == "CONFIRMED_NOT_APPLIED" and
+                         attempts_count < contract.get("retry_policy", {}).get("max", 1))
             mode = contract.get("mode", "NONE")
             key = contract.get("key")
             fresh = None
@@ -555,6 +589,10 @@ class Gateway:
                 or (eff["state"] == "CONFIRMED_NOT_APPLIED"
                     and fresh and fresh.get("outcome") == "CONFIRMED_SUCCEEDED")
             )
+            if retry_due and not contradicts:
+                # claim() proves durable scheduling requested work. A negative
+                # attempt outcome does not terminate the logical intent.
+                return self._dispatch(ws, iid, token, connector)
             with write_txn(self.conn) as conn:
                 if contradicts:
                     conn.execute(
@@ -624,7 +662,7 @@ class Gateway:
     def _dispatch(self, workspace_id: str, intent_id: str, token: str,
                   connector: Connector) -> dict:
         ctx = self.begin_attempt(workspace_id, intent_id, token)   # 事务内：先记录
-        response = connector.call(ctx["operation"], ctx["arguments"], ctx["idempotency_key"])
+        response = connector.call_attempt(ctx)
         if response is None:                                        # 事务外：再外呼
             state = self.mark_no_response(workspace_id, ctx["attempt_id"])
         else:

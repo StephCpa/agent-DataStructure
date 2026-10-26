@@ -86,6 +86,7 @@ class TestForgedReceiptRejected(unittest.TestCase):
 
     def test_forged_receipt_does_not_settle(self):
         conn, svc, ledger, auth, gw = stack()
+        self.addCleanup(conn.close)
         r = prepare(conn, auth, gw, intent_payload())
         claim_row = gw.claim(r["intent_id"])
         ctx = gw.begin_attempt(WS, r["intent_id"], claim_row["token"])
@@ -121,6 +122,7 @@ class TestMultilevelEvidenceChain(unittest.TestCase):
 
     def test_chain_invalidation_blocks_action(self):
         conn, svc, _, auth, gw = stack()
+        self.addCleanup(conn.close)
         o = observe(svc, url="https://src.example/only")
         c1 = claim(svc)
         justify(svc, WS, c1, [[o]], expected_head=head(conn))
@@ -142,6 +144,7 @@ class TestMultilevelEvidenceChain(unittest.TestCase):
 
     def test_rule_assumption_and_justification_retirement(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         # 规则只约束自己的论证：撤回规则不影响另一条独立论证
         o1, o2 = observe(svc, "https://a.example/1"), observe(svc, "https://b.example/2")
         rule = observe(svc, "https://rules.example/r1")
@@ -178,6 +181,7 @@ class TestUnknownDoesNotRedispatch(unittest.TestCase):
 
     def test_query_only_unknown_reconciles_instead_of_redispatch(self):
         conn, svc, _, auth, gw = stack()
+        self.addCleanup(conn.close)
 
         class QueryOnly(Connector):
             def __init__(self):
@@ -215,6 +219,7 @@ class TestGrantRevocationSeparated(unittest.TestCase):
 
     def test_revoke_after_prepare_blocks_dispatch(self):
         conn, svc, _, auth, gw = stack()
+        self.addCleanup(conn.close)
         p = intent_payload()
         h = head(conn)
         g = auth.issue_grant(WS, APPROVER, AGENT, compute_operation_digest(p),
@@ -234,6 +239,7 @@ class TestConfirmedNotOverwritten(unittest.TestCase):
 
     def test_late_query_error_keeps_success(self):
         conn, svc, ledger, auth, gw = stack()
+        self.addCleanup(conn.close)
 
         class Keyed(Connector):
             def __init__(self):
@@ -267,6 +273,7 @@ class TestReplayConsistency(unittest.TestCase):
 
     def test_pending_reevaluation_replays(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         o = observe(svc, "https://plan.example/input")
         task_obj = "task-" + uuid7()
         svc.submit_proposal(WS, [{
@@ -289,6 +296,7 @@ class TestManifestBinding(unittest.TestCase):
 
     def test_selected_candidate_invalidates_manifest(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         c_req = claim(svc)
         o_cand = observe(svc, "https://cand.example/x")
         out = project_context(conn, svc, WS, required_ids=[c_req],
@@ -301,6 +309,7 @@ class TestManifestBinding(unittest.TestCase):
 
     def test_missing_required_is_explicit_failure(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         o = observe(svc, "https://must.example/y")
         Purger(conn, svc).retire_or_purge(WS, [o], head(conn), "req-" + uuid7(),
                                           AGENT, mode="purge")
@@ -315,6 +324,7 @@ class TestDerivedIsolation(unittest.TestCase):
 
     def test_derived_copy_isolated_and_reimport_blocked(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         src = observe(svc, "https://secret.example/page")
         copy = svc.observe(WS, {
             "source": {"connector_identity": "web.fetch@v2",
@@ -352,6 +362,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
 
     def test_stale_object_baseline_rejected(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         task_obj = "task-" + uuid7()
         base = {"task_object_id": task_obj, "goal": "v1", "acceptance_refs": ["a"]}
 
@@ -375,6 +386,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
 
     def test_prior_revision_must_exist(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         with self.assertRaises(AsgError) as cm:
             svc.submit_proposal(WS, [{
                 "workspace_id": WS, "object_id": "o1", "kind": "CLAIM", "schema_version": 1,
@@ -386,6 +398,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
 
     def test_cross_workspace_ref_rejected(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         other = observe(svc)
         # 把观察改记为另一工作空间（直接构造第二个工作空间的记录）
         svc.submit_proposal("ws-other", [{
@@ -409,6 +422,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
 
     def test_digest_computed_by_service_and_branch_rejected(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         rid = "req-fixed"
         svc.observe(WS, {"source": {"connector_identity": "x", "url_or_handle": "u1",
                                     "content_version": "1"},

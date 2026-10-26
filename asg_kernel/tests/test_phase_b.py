@@ -27,8 +27,10 @@ class FakeKeyedRemote(Connector):
 
     def __init__(self, final_query_guarantee=True):
         super().__init__(ConnectorContract(mode="KEYED", supports_job_query=True,
-                                           final_query_guarantee=final_query_guarantee))
+                                           final_query_guarantee=final_query_guarantee,
+                                           supports_attempt_closure=final_query_guarantee))
         self.key_store: dict[str, dict] = {}
+        self.closed = set()
         self.call_count = 0
 
     def call(self, operation, arguments, idempotency_key):
@@ -43,6 +45,19 @@ class FakeKeyedRemote(Connector):
 
     def query_by_key(self, key):
         return self.key_store.get(key)
+
+    def call_attempt(self, context):
+        aid = context["attempt_id"]
+        if (context["idempotency_key"], aid) in self.closed:
+            self.call_count += 1
+            return {"outcome": "CONFIRMED_NOT_APPLIED", "closed_attempt_id": aid}
+        return super().call_attempt(context)
+
+    def close_attempt(self, key, attempt_id):
+        if key in self.key_store:
+            return self.key_store[key]
+        self.closed.add((key, attempt_id))
+        return {"outcome": "CONFIRMED_NOT_APPLIED", "closed_attempt_id": attempt_id}
 
 
 class FakeNoContractRemote(Connector):
@@ -121,6 +136,7 @@ def make_due(conn, intent_id):
 class TestHappyPathDispatch(unittest.TestCase):
     def test_prepare_dispatch_settle(self):
         conn, svc, ledger, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         remote = FakeKeyedRemote()
         r = prepare(gw, 0)
         out = gw.run_once(r["intent_id"], remote)
@@ -148,7 +164,8 @@ class TestTC04GrantBinding(unittest.TestCase):
     """TC-04 / I6：审批后改参数、接收者或产物——新动作不能借用旧授权。"""
 
     def test_modified_arguments_rejected(self):
-        _, svc, _, auth, gw = make_stack()
+        conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         v7 = intent_payload()
         grant = issue_grant_for(auth, v7, head=0)
         prepare(gw, 1, payload=v7, grant=grant["grant_id"])  # v7 获批并准备成功
@@ -159,7 +176,8 @@ class TestTC04GrantBinding(unittest.TestCase):
         self.assertEqual(cm.exception.code, "E402")
 
     def test_target_out_of_scope_rejected(self):
-        _, svc, _, auth, gw = make_stack()
+        conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         p = intent_payload(target_ids=["cluster-b/other-queue"])
         # 摘要与参数一致，但授权的目标范围只批准了 DEST：范围检查拒绝（E402）
         grant = auth.issue_grant(
@@ -170,7 +188,8 @@ class TestTC04GrantBinding(unittest.TestCase):
         self.assertEqual(cm.exception.code, "E402")
 
     def test_expired_and_revoked_and_exhausted(self):
-        _, svc, _, auth, gw = make_stack()
+        conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         p = intent_payload()
         # 过期授权在 prepare 即被拒
         expired = auth.issue_grant(WS, APPROVER, AGENT,
@@ -206,6 +225,7 @@ class TestTC05CrashBeforeReceipt(unittest.TestCase):
 
     def test_reconcile_by_key_confirms_success(self):
         conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         remote = FakeKeyedRemote()
         r = prepare(gw, 0)
         claim = gw.claim(r["intent_id"])
@@ -226,6 +246,7 @@ class TestTC05CrashBeforeReceipt(unittest.TestCase):
     def test_non_final_query_keeps_unknown(self):
         """查询不满足最终性：查无不能作为未生效依据，维持 UNKNOWN 并保留占用。"""
         conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         remote = FakeKeyedRemote(final_query_guarantee=False)
         remote.query_by_key = lambda key: None  # 模拟最终一致索引暂不可见
         r = prepare(gw, 0)
@@ -246,13 +267,14 @@ class TestTC06LeaseExpiry(unittest.TestCase):
     def test_keyed_dedup_no_duplicate_effect(self):
         """崩溃在开始记录之后、真正发出之前：对账判未生效后按同键安全重试。"""
         conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         remote = FakeKeyedRemote()
         r = prepare(gw, 0)
         claim = gw.claim(r["intent_id"])
         gw.begin_attempt(WS, r["intent_id"], claim["token"])  # ATTEMPT 已记录，未外呼
         expire_lease(conn, r["intent_id"])                    # 旧 worker 失联
         out = gw.run_once(r["intent_id"], remote)
-        # 对账（final 保证）判未生效 -> 同键重试一次 -> 成功；远端只收到一次调用
+        # 远端关闭旧 Attempt -> 同键新 Attempt 重试成功；远端只收到一次调用
         self.assertEqual(out["state"], "CONFIRMED_SUCCEEDED")
         self.assertEqual(remote.call_count, 1)
         attempts = conn.execute("SELECT COUNT(*) c FROM attempt WHERE intent_id=?",
@@ -262,6 +284,7 @@ class TestTC06LeaseExpiry(unittest.TestCase):
     def test_no_contract_refuses_redispatch(self):
         """无幂等契约：默认暂停自动重发（E604），保留 UNKNOWN 边界。"""
         conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         p = intent_payload(idempotency_contract={
             "mode": "NONE", "retry_policy": {"max": 3}})
         r = prepare(gw, 0, payload=p)
@@ -287,6 +310,7 @@ class TestPreconditionGate(unittest.TestCase):
 
     def test_stale_precondition_blocks_prepare_and_dispatch(self):
         conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         head = 0
         obs = svc.observe(WS, {
             "source": {"connector_identity": "web.fetch@v2",
@@ -330,6 +354,7 @@ class TestBudgetGrantIntegration(unittest.TestCase):
 
     def test_budget_shortage_rolls_back_everything(self):
         conn, svc, ledger, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         p = intent_payload()
         grant = issue_grant_for(auth, p, head=0)
         other = Ledger(conn)

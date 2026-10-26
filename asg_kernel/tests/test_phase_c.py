@@ -73,6 +73,7 @@ class TestTC01InvalidationPrecision(unittest.TestCase):
 
     def test_partial_withdraw_keeps_independent_support(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         o1 = observe(svc, url="https://a.example/1")
         o2 = observe(svc, url="https://a.example/2")
         o3 = observe(svc, url="https://b.example/3")
@@ -106,6 +107,7 @@ class TestTC02ContestedNotOverwritten(unittest.TestCase):
 
     def test_contested_state_surfaces(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         o1 = observe(svc, url="https://old.example/spec")
         c2 = make_claim(svc)
         justify(svc, WS, c2, [[o1]], expected_head=head_of(conn))
@@ -130,6 +132,7 @@ class TestTC08LineageNotIndependent(unittest.TestCase):
 
     def test_copies_share_root(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         root = observe(svc, url="https://origin.example/post")
         c1 = observe(svc, url="https://mirror1.example/x",
                      refs=[{"role": "extracted_from", "target_record_id": root}])
@@ -140,8 +143,8 @@ class TestTC08LineageNotIndependent(unittest.TestCase):
 
         ev = evaluate_support(conn, WS, c3)
         self.assertEqual(ev["four_state"], "SUPPORTED")
-        self.assertEqual(ev["independent_root_count"], 1)   # 三条路径同一根来源
-        self.assertEqual(ev["independent_roots"], [root])
+        self.assertEqual(ev["lineage_rooted_support_item_count"], 1)   # 显式谱系去重
+        self.assertEqual(ev["lineage_rooted_support_items"], [root])
 
         # 根来源撤回：转载链随之失效（DERIVATION 传播），不残留“独立”支持
         svc.invalidate(WS, root, "withdrawn", head_of(conn), "req-" + uuid7(), AGENT)
@@ -155,6 +158,7 @@ class TestPropagationTaskReeval(unittest.TestCase):
 
     def test_task_moves_to_pending_reevaluation(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         o1 = observe(svc, url="https://a.example/plan-input")
         task_obj = "task-" + uuid7()
         tp = {"task_object_id": task_obj, "goal": "整理数据说明",
@@ -195,6 +199,7 @@ class TestTC10StaleGate(unittest.TestCase):
 
     def test_unrelated_pending_invalidation_blocks_dispatch(self):
         conn, svc, _, auth, gw = make_stack()
+        self.addCleanup(conn.close)
         o_pre = observe(svc, url="https://a.example/pre")
         o_other = observe(svc, url="https://b.example/other")
         iid = self._prepare_intent(conn, auth, gw, [o_pre])
@@ -214,6 +219,7 @@ class TestTC10StaleGate(unittest.TestCase):
 
     def test_exploratory_read_returns_stale_annotation(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         o1 = observe(svc, url="https://a.example/x")
         o2 = observe(svc, url="https://b.example/y")
         svc.invalidate(WS, o2, "corrected", head_of(conn), "req-" + uuid7(), AGENT)
@@ -226,6 +232,7 @@ class TestTC09ContextBudget(unittest.TestCase):
 
     def test_required_over_budget_rejected(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         c_a = make_claim(svc, data_labels=["internal"])
         with self.assertRaises(AsgError) as cm:
             project_context(conn, svc, WS, required_ids=[c_a], candidate_ids=[],
@@ -236,6 +243,7 @@ class TestTC09ContextBudget(unittest.TestCase):
 
     def test_manifest_persisted_with_labels_and_omissions(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         c_req = make_claim(svc, data_labels=["internal"])
         c_big = make_claim(svc, data_labels=["sensitive:pii"],
                            constrained_text="超长候选" * 200)
@@ -265,6 +273,7 @@ class TestTC07PurgeRevival(unittest.TestCase):
 
     def test_purge_blocks_read_and_revival(self):
         conn, svc, _, _, _ = make_stack()
+        self.addCleanup(conn.close)
         o1 = observe(svc, url="https://secret.example/page")
         c1 = make_claim(svc)
         justify(svc, WS, c1, [[o1]], expected_head=head_of(conn))

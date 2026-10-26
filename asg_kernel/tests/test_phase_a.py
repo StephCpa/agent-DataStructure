@@ -57,6 +57,7 @@ def submit_observation(svc, head, url="https://example.org/spec"):
 class TestHappyPath(unittest.TestCase):
     def test_observe_claim_task_invalidate(self):
         conn, svc, _, proj = make_service()
+        self.addCleanup(conn.close)
         r1 = submit_observation(svc, 0)
         self.assertEqual(r1["sequence"], 1)
         self.assertEqual(r1["snapshot"]["head_sequence"], 1)
@@ -89,6 +90,7 @@ class TestINV01Immutable(unittest.TestCase):
 
     def test_direct_mutation_rejected(self):
         conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         r = submit_observation(svc, 0)
         rid = r["record_ids"][0]
         with self.assertRaises(sqlite3.DatabaseError) as cm:
@@ -105,7 +107,8 @@ class TestINV02FutureRef(unittest.TestCase):
     """TC-INV-02：不引用未来记录（I2）；不存在引用（E301）。"""
 
     def test_batch_future_ref_rejected(self):
-        _, svc, _, _ = make_service()
+        conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         id_a, id_b = str(uuid.uuid4()), str(uuid.uuid4())
         rec_a = {
             "workspace_id": WS, "record_id": id_a, "object_id": "obj-a", "kind": "CLAIM",
@@ -124,7 +127,8 @@ class TestINV02FutureRef(unittest.TestCase):
         self.assertEqual(cm.exception.code, "E302")
 
     def test_nonexistent_ref_rejected(self):
-        _, svc, _, _ = make_service()
+        conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         rec = {
             "workspace_id": WS, "object_id": "obj-c", "kind": "CLAIM",
             "schema_version": 1, "authenticated_writer": PRINCIPAL, "policy_domain": "default",
@@ -138,6 +142,7 @@ class TestINV02FutureRef(unittest.TestCase):
 
     def test_batch_prior_ref_accepted(self):
         conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         id_b = str(uuid.uuid4())
         rec_b = {
             "workspace_id": WS, "record_id": id_b, "object_id": "obj-b", "kind": "OBSERVATION",
@@ -161,7 +166,8 @@ class TestINV03RequestIdReuse(unittest.TestCase):
     """TC-INV-03：同一 request_id 不接受不同内容（I3）；同内容幂等重放。"""
 
     def test_reuse_with_different_content(self):
-        _, svc, _, _ = make_service()
+        conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         rid = "req-fixed-1"
         svc.observe(WS, obs_payload("https://a.example/1"), 0, rid, PRINCIPAL)
         with self.assertRaises(AsgError) as cm:
@@ -169,7 +175,8 @@ class TestINV03RequestIdReuse(unittest.TestCase):
         self.assertEqual(cm.exception.code, "E202")
 
     def test_identical_replay_returns_original(self):
-        _, svc, _, _ = make_service()
+        conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         rid = "req-fixed-2"
         payload = obs_payload("https://a.example/3")
         obj = "obs-" + uuid7()  # 幂等重放要求请求内容完全一致：同一 object_id
@@ -184,7 +191,8 @@ class TestINV04ConcurrentRevise(unittest.TestCase):
     """TC-INV-04：并发 revise 竞争——expected_head 冲突（E201）与基线不匹配（E203）。"""
 
     def test_stale_expected_head_rejected(self):
-        _, svc, _, _ = make_service()
+        conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         submit_observation(svc, 0)                     # seq 1
         submit_observation(svc, 1, url="https://b.example/1")  # seq 2
         with self.assertRaises(AsgError) as cm:        # 携带过期 head=0
@@ -193,7 +201,8 @@ class TestINV04ConcurrentRevise(unittest.TestCase):
         self.assertEqual(cm.exception.details["current_head"], 2)
 
     def test_task_baseline_mismatch_rejected(self):
-        _, svc, _, _ = make_service()
+        conn, svc, _, _ = make_service()
+        self.addCleanup(conn.close)
         tp1 = task_payload()
         r1 = svc.submit_proposal(WS, [{
             "workspace_id": WS, "object_id": tp1["task_object_id"], "kind": "TASK_REVISION",
@@ -218,7 +227,8 @@ class TestINV05ReplayDeterminism(unittest.TestCase):
     """TC-INV-05：回放重建投影与在线投影逐字段一致（I9 的确定性基础）。"""
 
     def test_replay_matches_live(self):
-        _, svc, _, proj = make_service()
+        conn, svc, _, proj = make_service()
+        self.addCleanup(conn.close)
         r1 = submit_observation(svc, 0)
         claim_obj = "claim-" + uuid7()
         svc.claim(WS, claim_payload(), 1, "req-" + uuid7(), PRINCIPAL, object_id=claim_obj,
@@ -247,7 +257,8 @@ class TestTC03Budget(unittest.TestCase):
     """TC-03：预算 100，两个 Agent 各预留 60——第二笔拒绝且失败可解释（I5）。"""
 
     def test_double_reserve_rejected_with_details(self):
-        _, _, ledger, _ = make_service()
+        conn, _, ledger, _ = make_service()
+        self.addCleanup(conn.close)
         ledger.ensure_budget("ws:compute.gpu", 100)
         r1 = ledger.reserve(WS, "intent-a", [{"resource_key": "ws:compute.gpu", "amount": 60}])
         self.assertEqual(len(r1), 1)
@@ -270,7 +281,8 @@ class TestTC03Budget(unittest.TestCase):
 
     def test_unknown_retains_reservation(self):
         """UNKNOWN 保留占用（6.3 节）：uncertain 期间余量不回升。"""
-        _, _, ledger, _ = make_service()
+        conn, _, ledger, _ = make_service()
+        self.addCleanup(conn.close)
         ledger.ensure_budget("ws:compute.gpu", 100)
         r1 = ledger.reserve(WS, "intent-a", [{"resource_key": "ws:compute.gpu", "amount": 60}])
         self.assertEqual(ledger.settle(r1[0], "UNKNOWN"), "uncertain")

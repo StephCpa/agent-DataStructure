@@ -1,0 +1,19 @@
+{
+  "source_files": 40,
+  "all_archive_hashes_match": true,
+  "all_workspace_hashes_match": true,
+  "all_extracted_hashes_match": true,
+  "tests_exit_code": 0,
+  "test_summary": [
+    "Ran 123 tests in 15.520s",
+    "",
+    "OK"
+  ],
+  "frozen_reducer_v1_v2_unchanged": true,
+  "previous_archive_hashes": {
+    "round5": "ee273c97bed6dc71a12c39dc3a5d0a9228b700c155169effd3fc8b638b827d47",
+    "round6": "69e04fa107f113d70a758b756a975b768027e29e1d10aa3cefe81425bf5d5fac"
+  },
+  "archive_sha256": "214efb390b9cec3c9ca68ddccf1cc7698509c94fa714fe2728f47ca4f0cdba3c",
+  "verification_note": "Extracted snapshot tests passed; final metadata step retried after correcting absent round5 checksum sidecar."
+}

@@ -1,0 +1,2314 @@
+diff --git a/asg_kernel/README.md b/asg_kernel/README.md
+index 35a56e8..39b8e47 100644
+--- a/asg_kernel/README.md
++++ b/asg_kernel/README.md
+@@ -14,7 +14,7 @@ cd asg_kernel
+ python -m unittest discover -s tests -t . -v
+ ```
+ 
+-45 项测试全部通过（含跨模块契约回归）。阶段 A 验收：I1–I5 无反例、TC-INV-01 至 04 与 TC-03 通过
++当前工作树 **123 项测试全部通过**（2026-10-27；[第七轮边界修复](ROUND7_CONTRACTS.md)，[第六轮契约与恢复验收](ROUND6_CONTRACTS.md)，[第五轮历史审核](AUDIT_2026-10-26.md)）。阶段 A 验收：I1–I5 无反例、TC-INV-01 至 04 与 TC-03 通过
+ （另含 TC-INV-05）；阶段 B 验收：TC-04（I6）、TC-05（回执前崩溃，I7）、
+ TC-06（租约过期去重）及预算授权原子集成通过；阶段 C 验收：TC-01（失效传播
+ 精确撤销）、TC-02（冲突 CONTESTED 不自动覆盖）、TC-07（删除复活阻止，I10）、
+@@ -30,11 +30,11 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | `asg/authorize.py` | M4 策略服务：operation_digest 规范化（JCS 思路 + 版本前缀）、Grant 签发/撤销/占用、prepare 与 dispatch 双检查点 | 6.4 / 9.1 / CP-2 |
+ | `asg/gateway.py` | M2 执行网关：prepare_effect 单事务组合（意图+预留+占用+outbox）、领取/重验证/先记录后外呼、回执持久化与聚合结算、对账（覆盖/可见性/最终性信任边界）、E603/E604 放弃路径 | 5.5 / 5.6 / 6.1 / 7.6 / 7.7 |
+ | `asg/ledger.py` | 预算账本与原子预留、结算（committed / released / uncertain）；reserve_in_txn/settle_in_txn 供网关同事务组合 | 7.5 / 6.3 |
+-| `asg/projection.py` | reducer v1 与确定性回放、在线投影比对 | 7.9 / 2.4 |
++| `asg/projection.py` | reducer v3、冻结 v1/v2 审计回放、在线投影比对 | 7.9 / 2.4 |
+ | `asg/storage.py` | SQLite 开发适配层：表结构、不可变触发器、约束 | 第 4 章 |
+ | `asg/errors.py` | 错误码目录 A/B 子集 | 第 10 章 |
+ | `asg/invalidation.py` | M3/M6 失效传播：反向依赖闭包（DERIVATION/CONTROL 边）、任务待重评、投影水位、read_gate 闸门（critical 拒绝 / exploratory 陈旧标注） | 7.3 |
+-| `asg/evidence.py` | M3 证据求值：OR-of-AND 支持电路、规则全局合取、四态（含 CONTESTED）、预算截断 truncated、来源谱系根去重 | 3.6 / 7.2 |
++| `asg/evidence.py` | M3 证据求值：OR-of-AND 支持电路、规则/假设按论证独立合取、四态（含 CONTESTED）、预算截断 truncated、来源谱系根去重 | 3.6 / 7.2 |
+ | `asg/context.py` | M3 上下文投影：绑定单元组装、必需约束预算检查（E701）、候选裁剪入 omitted 摘要、标签并集、清单落账与有效期 | 3.12 / 7.4 |
+ | `asg/purge.py` | M4 删除域：retire_or_purge（墓碑先行 + policy_epoch 推进 + 在线清理 + 派生再生计划）、读取门控（E802 复活阻止） | 7.8 / 9.4 |
+ | `asg/ids.py` | UUIDv7 标识、规范化 JSON 与 SHA-256 摘要 | 3.1 / 9.1 |
+@@ -56,7 +56,7 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | TC-01 | `TestTC01InvalidationPrecision` | 撤回 E1 仅使 (E1 AND E2) 路径退出，独立 E3 支持保留；再撤 E3 后转 NONE；主张未被误删 |
+ | TC-02 | `TestTC02ContestedNotOverwritten` | 较新低可信反证进入 CONTESTED 必须展示；较早支持路径与主张原文不被覆盖 |
+ | TC-07 | `TestTC07PurgeRevival` | 墓碑先行、policy_epoch 推进、blob 清理；read E802、回放旧快照不复活、同内容观察 E802、purged 证据退出求值、再生计划给出 |
+-| TC-08 | `TestTC08LineageNotIndependent` | 三条转载路径同一根来源，independent_root_count=1；根撤回后谱系整体失效 |
++| TC-08 | `TestTC08LineageNotIndependent` | 三条转载路径同一根来源，lineage_rooted_support_item_count=1（仅显式谱系）；根撤回后谱系整体失效 |
+ | 传播 | `TestPropagationTaskReeval` | 失效命中任务 depends_on 前提：任务进入 PENDING_REEVALUATION |
+ | TC-09 | `TestTC09ContextBudget` | 必需约束超预算 E701（附成本明细）；恰好装下时候选裁剪入 omitted、标签只随选中传播、清单落账 |
+ | TC-10 | `TestTC10StaleGate` | 无关传播未完成即阻塞 dispatch（E401）；水位推进后放行；探索读取返回显式陈旧标注 |
+@@ -96,16 +96,15 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ 11. **上下文排序**：阶段 C 以记录序号代理效用（U 为待验证估计），
+     分词器为 simple-v1 估算；真实检索器与排序器按 7.4 节契约接入。
+ 12. **派生再生**：删除后给出再生计划（受影响派生记录清单），
+-    正文级再生随阶段 D 工具模拟器落地；差分隐私与备份物理清除不在此承诺。
++    正文级再生尚未实现；差分隐私与备份物理清除不在此承诺。
+ 
+ ## 里程碑状态（eb1381b 评审收敛后）
+ 
+-> 阶段 A/B/C 的主要接口与执行路径已实现，51 项测试通过（含跨模块契约回归、
+-> 故障交错轨迹，以及 60 条随机轨迹的状态机组合不变量检查）。
+-> **阶段 D 的契约前置已满足**：正式收益比较可以启动。随机轨迹覆盖的不变量为：
+-> 账本与预留行恒等且不越额、committed 单调不减、CONFIRMED_SUCCEEDED 不被离开、
+-> 离开 CONFIRMED_NOT_APPLIED 必带冲突标记、成功后不再产生外部调用、
+-> 授权占用不超过 use_limit。
++> 阶段 A/B/C 的主要接口与执行路径已实现，当前 123 项测试通过。
++> 原四轮 58 项、第五轮 75 项、第六轮 105 项、第七轮 123 项；第五、六轮源码保持冻结。
++> **仅在已测输入与故障集合内验收，阶段 D 正式收益比较仍需强基线与额外契约验收。**
++> 执行域为 60 条 × 12 事件；证据/删除域为 40 条 × 6 事件，两套生成器尚未合并。
++> 测试数量不构成完整契约证明。第二、三层真实模型评估尚未开始。
+ 
+ 本轮收敛（对应评审反例，回归用例见 `tests/test_contract_regression.py`）：
+ 
+@@ -123,7 +122,7 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | 派生副本随源记录隔离；复活阻止按稳定内容身份（来源+片段），采集时间变化不能绕过 | purge / write_service |
+ | 失效传播后的任务待重评状态可由 reducer 重建，在线与回放一致 | projection |
+ 
+-第三轮补充（故障交错轨迹，见 `tests/test_fault_interleaving.py`，5 项）：
++第二轮补充（故障交错轨迹，见 `tests/test_fault_interleaving.py`，5 项）：
+ 
+ | 轨迹 | 验收结果 |
+ |------|---------|
+@@ -133,18 +132,18 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | 已确认成功后对账返回未生效 | E605 显式保留冲突，状态与已结算预算不被覆盖 |
+ | 先确认未生效并释放预留，随后迟到成功回执 | 不静默改为成功，committed 保持 0 |
+ 
+-第四轮（状态机组合，见 `tests/test_state_machine_combinations.py`）：固定种子生成
++第三轮（状态机组合，见 `tests/test_state_machine_combinations.py`）：固定种子生成
+ 60 条轨迹、每条 12 个随机事件（run / 租约过期 / 重试到期 / 迟到回执），
+ 连接器的调用结果与查询可见性同样由种子决定。每步之后检查六条不变量
+-（账本恒等与额度、committed 单调、成功态不离开、未生效态离开必带冲突标记、
++（账本恒等与额度、committed 单调、成功态不离开、未生效态无新增 Attempt 时离开须带冲突标记、
+ 成功后无新外部调用、授权占用不超限），全部通过。
+ 
+-## 阶段 D 第一层（已启动）
++## 第四轮：阶段 D 第一层场景脚手架
+ 
+ `eval/systems.py` 与 `tests/test_baseline_comparison.py` 用确定性记录和假工具，
+-把 ASG 与一个简单基线放在同一批故障场景上对比。基线 = 消息列表 + 事实就地覆盖
+-+ 操作名称级授权 + 崩溃后盲目重试 + 软删除 + 先读后写的预算判断，对应说明书
+-第 3 章候选表里“消息数组加摘要”与“成熟工作流加 SQL 版本和 outbox”的最小组合。
++把 ASG 与显式缺少保护机制的朴素对照放在相同故障场景上。对照采用消息列表、
++事实就地覆盖、操作名称级授权、盲目重试、软删除和先读后写预算判断。
++它没有实现 SQL 事务、版本日志和持久化 outbox，**不能代表成熟工作流**。
+ 
+ | 场景（说明书 13.3 节） | ASG | 基线 |
+ |---|---|---|
+@@ -156,6 +155,55 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | 删除后读旧副本 / 重新采集 | 均 E802 | 旧副本仍可读，重新采集不受限 |
+ | 撤回后在线状态与回放对比 | 一致 | 无历史可回放 |
+ 
+-基线的失败是该方案的固有行为，用作对照而非待修复缺陷。这一层隔离了模型随机性；
+-第二层（自然语言抽取对照 oracle）与第三层（完整任务成功率与成本）尚未开始，
+-且组合测试仍未覆盖随机化的证据链与删除域交错。
++这些失败只说明场景能检出被关闭的机制，不能推出相对成熟系统的收益。
++本轮增加正常成功对照、明确的 E401/E402 断言及外部调用计数；恢复重发保留原参数。
++正式比较还需要具有原子预算、内容授权、持久化 outbox、查询/幂等恢复与版本日志的对照，
++分别统计调用次数和实际副作用次数，并报告开销。
++
++## 第五轮：历史推进（75 项，已封存源码快照）
++
++- 补齐 Justification 到目标 Claim 的求值传播关系，在线与回放共用依赖闭包；
++  Claim 的重算标记不等于全部支持无效，独立支持路径保留。
++- 传播排空时也重验历史撤回根，覆盖撤回之后追加的新依赖；当前采用全图扫描，尚未优化性能。
++- 直接撤回 Claim 后不再允许其作为动作前提。
++- 同步隔离完整显式派生闭包，统一副本的稳定来源/片段身份，阻止副本重新采集和从已删除记录新建副本。
++- 读取核对工作空间；清单引用仅绑定实际选中项，省略项不触发错误失效。
++- 修订不能省略 supersedes，批内按已推进的对象头检查；幂等快路径仍校验分支；保存自报身份声明。
++- 执行轨迹拒绝静默跳过准备失败和非预期错误，断言 60 条、720 步及两类连接器实际覆盖。
++- 新增 14 项跨域测试（其中 1 项运行 40 条/240 事件），2 项生成器防空通过测试，1 项正常执行对照。
++
++上述为第五轮范围。第六轮进一步完成以下有界验收，详见 [契约说明](ROUND6_CONTRACTS.md)。
++
++## 第六轮：求值、版本、晚到依赖与持久恢复
++
++- 求值返回 FOUND / ABSENT / UNKNOWN 与 COMPLETE / INCOMPLETE；全递归共享 paths、
++  recompute 预算，深度与组宽分开计量。prepare、dispatch 和关键读取拒绝不完整前提。
++- 论证按逻辑 object_id 选择快照中的最新修订，撤回不回退；载荷引用与 typed_refs 统一规范化，
++  漏边补齐、冲突拒绝，父版本关系持久化。
++- 任务与清单使用服务生成的依赖版本戳。晚到失效依赖立即阻断；独立支持和显式任务重评可恢复健康状态，
++  连续空排空保持业务固定点。新提交使用 reducer v2，保留冻结 v1 供历史审计。
++- 新增磁盘 SQLite、独立进程硬退出、持久假远端和活旧 worker 的租约接管测试。
++  调用、查询、实际效果、重复效果、未批准效果分开计数。
++- 历史 checkpoint 只能作为受当前 authority 约束的读取视图；当前授权、预算和 outbox
++  由事务业务表持久化恢复，不声称仅从 record 日志重建全部业务状态。
++
++第六轮新增 30 项测试（预算 11、版本/依赖 11、持久恢复/模拟器 8），总计 105 项通过。
++原有两套随机生成器仍为 60×12 与 40×6，尚未合并。
++
++仍未验收：SQL 扫描/全图传播的硬预算、大图性能、完整灾备回滚与分布式故障、严格真实服务认证、
++成熟强基线、真实模型第二/三层。不能据测试总数宣布完整契约或正式收益已证明。
++
++
++## 第七轮：独立复核后的交接边界修复
++
++- 对账提交之后、重新领取之前硬退出，重启仍继续持久化重试；次数耗尽和授权撤销的对照禁止发送。
++- 普通负查询保留 UNKNOWN 与资源责任。持久假远端实现逐 Attempt 关闭；旧 PID 在外呼前暂停，
++  接管关闭后即使恢复发送也不产生效果。新的 Attempt 仍可按原键正常执行。
++- TaskRevision 的载荷任务身份必须等于信封对象身份，错配整批 E101；合法修订保留阳性路径。
++- 上下文构建和提交共用一个 SQLite WAL 读取事务；期间写入导致 E702 回滚并要求重建，
++  不再用新状态的 stamp 认证旧渲染。渲染计数也纳入复用检查。
++- 任务自身撤回/删除和 uses_version 依赖纳入状态判断；新提交使用 reducer v3，历史 v1/v2 保留。
++- 来源指标改名并明确仅统计直接支持项的显式谱系去重，不称作独立原始来源数。
++
++新增 18 项，当前共 123 项；具体协议、测试对应、兼容性变化与保留边界见
++[第七轮契约说明](ROUND7_CONTRACTS.md)。代码仍在未提交工作树，HEAD 为 `1ff974a`。
+diff --git a/asg_kernel/asg/__init__.py b/asg_kernel/asg/__init__.py
+index 18f979c..5155a29 100644
+--- a/asg_kernel/asg/__init__.py
++++ b/asg_kernel/asg/__init__.py
+@@ -13,7 +13,7 @@
+ from .errors import AsgError, ERROR_NAMES
+ from .ids import uuid7, digest_obj, canonical_json
+ from .ledger import Ledger, reserve_in_txn, settle_in_txn
+-from .projection import Projection, reducer_v1
++from .projection import Projection, reducer_v1, reducer_v2
+ from .storage import connect, init_schema, write_txn
+ from .write_service import WriteService
+ from .authorize import Authorizer, compute_operation_digest
+@@ -26,7 +26,7 @@ from .purge import Purger
+ __all__ = [
+     "AsgError", "ERROR_NAMES", "uuid7", "digest_obj", "canonical_json",
+     "Ledger", "reserve_in_txn", "settle_in_txn",
+-    "Projection", "reducer_v1", "connect", "init_schema", "write_txn",
++    "Projection", "reducer_v1", "reducer_v2", "connect", "init_schema", "write_txn",
+     "WriteService", "Authorizer", "compute_operation_digest",
+     "Gateway", "Connector", "ConnectorContract",
+     "process_queue", "read_gate", "watermark", "marks_on",
+diff --git a/asg_kernel/asg/context.py b/asg_kernel/asg/context.py
+index 1d9b106..30c6578 100644
+--- a/asg_kernel/asg/context.py
++++ b/asg_kernel/asg/context.py
+@@ -16,6 +16,7 @@ from . import evidence
+ from .errors import AsgError
+ from .ids import digest_obj, uuid7
+ from .invalidation import read_gate
++from .dependencies import current_stamp
+ 
+ TOKENIZER_VERSION = "simple-v1"
+ RETRIEVAL_VERSION = "retrieval-v1"
+@@ -46,14 +47,14 @@ def _snapshot(conn, workspace_id: str) -> dict:
+         "head_sequence": row["head_sequence"] if row else 0,
+         "validation_epoch": row["validation_epoch"] if row else 1,
+         "policy_epoch": row["policy_epoch"] if row else 1,
+-        "reducer_version": 1,
++        "reducer_version": 3,
+     }
+ 
+ 
+ def binding_unit(conn, workspace_id: str, record_id: str) -> dict | None:
+     """绑定单元组装（7.4 节步骤 3）：正文片段 + 状态 + 关键来源指针 + 约束。"""
+     row = conn.execute("SELECT * FROM record WHERE record_id=?", (record_id,)).fetchone()
+-    if row is None or row["kind"] not in ALLOWED_KINDS:
++    if row is None or row["workspace_id"] != workspace_id or row["kind"] not in ALLOWED_KINDS:
+         return None
+     if conn.execute("SELECT 1 FROM tombstone WHERE record_id=? AND mode='purge'",
+                     (record_id,)).fetchone():
+@@ -66,6 +67,8 @@ def binding_unit(conn, workspace_id: str, record_id: str) -> dict | None:
+         unit = {
+             "record_id": record_id, "kind": row["kind"], "text": str(text),
+             "four_state": state["four_state"],
++            "evaluation_status": state["evaluation_status"],
++            "exhausted_budget": state["exhausted_budget"],
+             "unresolved_conflict": state["four_state"] == "CONTESTED",
+             "units_field": payload.get("units"),
+             "valid_time": payload.get("valid_time"),
+@@ -100,6 +103,32 @@ def deterministic_ledger_query(conn, workspace_id: str, kind: str) -> int:
+ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
+                     candidate_ids: list[str], token_budget: int,
+                     task_revision_id: str | None = None) -> dict:
++    """Read and certify one SQLite snapshot; concurrent writes require rebuilding.
++
++    Deferred WAL transaction permits a writer during construction. Upgrading a
++    stale read snapshot to a write fails rather than certifying old rendering.
++    This also covers ledger/watermark inputs not versioned by head_sequence.
++    """
++    if conn.in_transaction or svc.conn is not conn:
++        raise AsgError("E702", "Context requires its own transaction on the service connection")
++    conn.execute("BEGIN")
++    try:
++        result = _project_in_txn(conn, svc, workspace_id, required_ids, candidate_ids,
++                                 token_budget, task_revision_id)
++        conn.execute("COMMIT")
++        return result
++    except sqlite3.OperationalError as error:
++        conn.rollback()
++        if getattr(error, "sqlite_errorcode", 0) & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
++            raise AsgError("E702", "Context read snapshot changed; rebuild required", retryable=True) from error
++        raise
++    except BaseException:
++        conn.rollback()
++        raise
++
++
++def _project_in_txn(conn, svc, workspace_id, required_ids, candidate_ids, token_budget,
++                    task_revision_id):
+     """上下文投影（7.4 节）：过滤 -> 绑定单元 -> M 预算检查 -> U 填充 -> 清单落账。"""
+     # 探索检索走闸门但不阻断：显式标注陈旧
+     gate = read_gate(conn, workspace_id, required_ids + candidate_ids, purpose="exploratory")
+@@ -138,14 +167,15 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
+ 
+     labels = sorted({l for u in selected for l in u.get("data_labels", [])})
+     snap = _snapshot(conn, workspace_id)
++    ledger_inputs = {"claim_count": deterministic_ledger_query(conn, workspace_id, "CLAIM")}
+     rendered = json.dumps(
+         {"units": [{k: v for k, v in u.items() if k != "record_id"} or u for u in selected],
+-         "ledger": {"claim_count":
+-                    deterministic_ledger_query(conn, workspace_id, "CLAIM")}},
++         "ledger": ledger_inputs},
+         ensure_ascii=False, sort_keys=True)
+     manifest_payload = {
+         "context_id": "ctx-" + uuid7(),
+         "snapshot": snap,
++        "ledger_inputs": ledger_inputs,
+         "task_revision_id": task_revision_id,
+         "selected_items": [{"record_id": u["record_id"], "span": u.get("span"),
+                             "transform_id": "identity@1"} for u in selected],
+@@ -169,13 +199,13 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
+         "policy_domain": "default",
+         "payload": manifest_payload,
+         "typed_refs": [{"role": "selected_into", "target_record_id": rid}
+-                       for rid in dict.fromkeys(required_ids + candidate_ids)],
++                       for rid in dict.fromkeys(u["record_id"] for u in selected)],
+         "prior_revision_ids": [],
+     }
+     head = conn.execute(
+         "SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
+     ).fetchone()["head_sequence"]
+-    result = svc.submit_proposal(workspace_id, [record], head, "req-" + uuid7())
++    result = svc.commit_in_txn(conn, workspace_id, "main", [record], head, "req-" + uuid7())
+     return {
+         "context_manifest_id": manifest_payload["context_id"],
+         "commit": result,
+@@ -189,13 +219,19 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
+ 
+ def manifest_valid(conn, workspace_id: str, manifest_record_id: str) -> bool:
+     """清单有效性：命中失效标记或策略纪元变更即过期（E702 语义）。"""
+-    row = conn.execute("SELECT payload FROM record WHERE record_id=? AND kind='CONTEXT_MANIFEST'",
+-                       (manifest_record_id,)).fetchone()
++    row = conn.execute("SELECT payload FROM record WHERE record_id=? AND workspace_id=? AND kind='CONTEXT_MANIFEST'",
++                       (manifest_record_id, workspace_id)).fetchone()
+     if row is None:
+         return False
+     p = json.loads(row["payload"])
+     if _policy_epoch(conn, workspace_id) != p.get("policy_epoch"):
+         return False
++    if "ledger_inputs" in p and p["ledger_inputs"] != {
++            "claim_count": deterministic_ledger_query(conn, workspace_id, "CLAIM")}:
++        return False
++    validation = p.get("_validation")
++    if validation:
++        return validation["stamp"] == current_stamp(conn, workspace_id, validation["roots"])
+     hit = conn.execute(
+         "SELECT 1 FROM invalidation_mark WHERE workspace_id=? AND record_id=?",
+         (workspace_id, manifest_record_id),
+diff --git a/asg_kernel/asg/evidence.py b/asg_kernel/asg/evidence.py
+index 64e3b6a..d353194 100644
+--- a/asg_kernel/asg/evidence.py
++++ b/asg_kernel/asg/evidence.py
+@@ -15,7 +15,7 @@ import sqlite3
+ from .errors import AsgError
+ from .ids import uuid7
+ 
+-DEFAULT_BUDGET = {"max_paths": 16, "max_depth": 8, "max_recompute": 512}
++DEFAULT_BUDGET = {"max_paths": 16, "max_depth": 8, "max_recompute": 512, "max_group_width": 64}
+ 
+ FOUR_STATE = {
+     (False, False): "NONE",
+@@ -30,7 +30,8 @@ LINEAGE_ROLES = ("derived_from", "extracted_from", "transcribed_from")
+ def justify(svc, workspace_id: str, claim_record_id: str,
+             support_groups: list[list[str]], refute_groups: list[list[str]] | None = None,
+             rule_refs: list[str] | None = None, assumption_refs: list[str] | None = None,
+-            expected_head: int = 0, principal: dict | None = None) -> dict:
++            expected_head: int = 0, principal: dict | None = None,
++            object_id: str | None = None, supersedes: str | None = None) -> dict:
+     """登记 Justification（3.6 节）。refute_groups 与 support_groups 同构：OR of AND。"""
+     refute = refute_groups or []
+     payload = {
+@@ -46,17 +47,19 @@ def justify(svc, workspace_id: str, claim_record_id: str,
+             + [{"role": "uses_version", "target_record_id": r} for r in (rule_refs or [])]
+             # 假设与目标主张也入引用图：撤回它们时失效传播能到达本论证（7.3 节）
+             + [{"role": "uses_version", "target_record_id": a} for a in (assumption_refs or [])]
+-            + [{"role": "supports", "target_record_id": claim_record_id}])
++            + [{"role": "targets_claim", "target_record_id": claim_record_id}])
++    if supersedes:
++        refs.append({"role": "supersedes", "target_record_id": supersedes})
+     record = {
+         "workspace_id": workspace_id,
+-        "object_id": "just-" + uuid7(),
++        "object_id": object_id or "just-" + uuid7(),
+         "kind": "JUSTIFICATION",
+         "schema_version": 1,
+         "authenticated_writer": principal or {"kind": "service", "id": "read-service"},
+         "policy_domain": "default",
+         "payload": payload,
+         "typed_refs": refs,
+-        "prior_revision_ids": [],
++        "prior_revision_ids": [supersedes] if supersedes else [],
+     }
+     return svc.submit_proposal(workspace_id, [record], expected_head,
+                                "req-" + uuid7(), principal=principal)
+@@ -78,115 +81,191 @@ def root_source(conn: sqlite3.Connection, record_id: str) -> str:
+     return current  # 防御：异常环路时返回当前节点
+ 
+ 
+-def _retired_roots(conn, workspace_id: str) -> set[str]:
+-    return {r["root_record_id"] for r in conn.execute(
+-        "SELECT root_record_id FROM invalidation_queue WHERE workspace_id=?", (workspace_id,)
+-    ).fetchall()}
++def _retired_roots(conn, workspace_id, as_of):
++    return {json.loads(r["payload"])["target"]["record_id"] for r in conn.execute(
++        "SELECT payload FROM record WHERE workspace_id=? AND kind='RETIRE_PURGE_MARK'"
++        " AND sequence<=?", (workspace_id, as_of))}
+ 
+ 
+-def _marked(conn, workspace_id: str, record_id: str) -> bool:
+-    return conn.execute(
+-        "SELECT 1 FROM invalidation_mark WHERE workspace_id=? AND record_id=?",
+-        (workspace_id, record_id),
+-    ).fetchone() is not None
++class _Evaluation:
++    """One request, one shared budget. Cache hits cost zero recompute units.
+ 
++    A unit is one uncached record inspection or one AND group visit.
++    max_paths counts group visits across both polarities and all child claims.
++    max_depth counts nested evidence edges below the root (root depth = 0).
++    SQL enumeration/IO and provenance reporting are not wall-clock budgets.
++    """
++    def __init__(self, conn, workspace_id, as_of, budget):
++        self.conn, self.ws = conn, workspace_id
++        head = conn.execute("SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?",
++                            (workspace_id,)).fetchone()
++        self.as_of = as_of if as_of is not None else (head[0] if head else 0)
++        self.limits = dict(DEFAULT_BUDGET)
++        for key, value in (budget or {}).items():
++            if key not in self.limits or type(value) is not int or value < 0:
++                raise AsgError("E101", f"Invalid evaluation budget: {key}={value!r}")
++            self.limits[key] = value
++        if self.limits["max_depth"] > 128:
++            raise AsgError("E101", "max_depth must not exceed the recursive implementation limit 128")
++        self.used = {"paths": 0, "recompute": 0, "max_depth": 0, "cache_hits": 0}
++        self.exhausted = set()
++        self.records, self.results = {}, {}
++        self.retired = _retired_roots(conn, workspace_id, self.as_of)
++        # Current deletion policy always applies, even to historical evaluation.
++        self.purged = {r[0] for r in conn.execute(
++            "SELECT record_id FROM tombstone WHERE workspace_id=? AND mode='purge'", (workspace_id,))}
+ 
+-def _purged(conn, record_id: str) -> bool:
+-    return conn.execute(
+-        "SELECT 1 FROM tombstone WHERE record_id=? AND mode='purge'", (record_id,)
+-    ).fetchone() is not None
+-
++    def spend(self, name):
++        if self.used[name] >= self.limits["max_" + name]:
++            self.exhausted.add("max_" + name)
++            return False
++        self.used[name] += 1
++        return True
+ 
+-def eligible(conn, workspace_id: str, record_id: str, as_of: int | None = None,
+-             _stack: tuple = ()) -> bool:
+-    """证据资格：版本存在于 as_of 之前，未被撤回/标记/删除。
++    def record(self, rid):
++        if rid in self.records:
++            self.used["cache_hits"] += 1
++            return self.records[rid]
++        if not self.spend("recompute"):
++            return None, False
++        row = self.conn.execute("SELECT * FROM record WHERE record_id=? AND workspace_id=?"
++                                " AND sequence<=?", (rid, self.ws, self.as_of)).fetchone()
++        rec = dict(row) if row else None
++        if rec:
++            rec["payload"] = json.loads(rec["payload"])
++        self.records[rid] = (rec, True)
++        return rec, True
+ 
+-    主张成员递归求值：作为支持成员的 Claim 只有自身正向支持成立才合格
+-    （评审反例：O→C1→C2 撤回 O 后 C2 仍 SUPPORTED）。循环引用不凭空产生支持。
+-    """
+-    row = conn.execute("SELECT sequence, kind FROM record WHERE record_id=?",
+-                       (record_id,)).fetchone()
+-    if row is None:
+-        return False
+-    if as_of is not None and row["sequence"] > as_of:
+-        return False
+-    if record_id in _retired_roots(conn, workspace_id):
+-        return False
+-    if _marked(conn, workspace_id, record_id):
+-        return False
+-    if _purged(conn, record_id):
+-        return False
+-    if row["kind"] == "CLAIM":
+-        if record_id in _stack:  # 循环主张互引用不产生支持（3.6 节）
++    def member(self, rid, depth, stack):
++        if depth > self.limits["max_depth"]:
++            self.exhausted.add("max_depth")
++            return None
++        self.used["max_depth"] = max(self.used["max_depth"], depth)
++        rec, complete = self.record(rid)
++        if not complete:
++            return None
++        if rec is None or rid in self.retired or rid in self.purged:
+             return False
+-        ev = evaluate_support(conn, workspace_id, record_id, as_of, _stack=_stack + (record_id,))
+-        return ev["supported"] and not ev["refuted"]
+-    return True
++        if rid in stack:
++            self.exhausted.add("cycle")
++            return None
++        if rec["kind"] == "CLAIM":
++            result = self.claim(rid, depth, stack)
++            if result["truncated"]:
++                return None
++            return result["supported"] and not result["refuted"]
++        # Ancestry is checked synchronously, including before any queue drain.
++        parents = [r[0] for r in self.conn.execute(
++            "SELECT DISTINCT dst_record_id FROM record_ref WHERE src_record_id=? AND ref_role IN"
++            " ('derived_from','extracted_from','transcribed_from','uses_version','depends_on','selected_into')"
++            " ORDER BY dst_record_id", (rid,))]
++        return self.conjunction(parents, depth, stack + (rid,))
+ 
++    def conjunction(self, members, depth, stack):
++        if len(members) > self.limits["max_group_width"]:
++            self.exhausted.add("max_group_width")
++            return None
++        unknown = False
++        for rid in members:
++            value = self.member(rid, depth + 1, stack)
++            if value is False:
++                return False
++            unknown |= value is None
++        return None if unknown else True
+ 
+-def evaluate_support(conn, workspace_id: str, claim_record_id: str,
+-                     as_of: int | None = None, budget: dict | None = None,
+-                     _stack: tuple = ()) -> dict:
+-    """支持电路求值（7.2 节，按论证独立求值）。
++    def claim(self, rid, depth=0, stack=()):
++        cache_key = (rid, depth)
++        if cache_key in self.results:
++            self.used["cache_hits"] += 1
++            return self.results[cache_key]
++        rec, complete = self.record(rid)
++        if not complete:
++            return self.result(rid, [], [], True, True, 0)
++        if (rec is None or rec["kind"] != "CLAIM" or rid in self.retired or rid in self.purged):
++            return self.result(rid, [], [], False, False, 0)
++        if depth > self.limits["max_depth"] or rid in stack:
++            self.exhausted.add("cycle" if rid in stack else "max_depth")
++            return self.result(rid, [], [], True, True, 0)
++        self.used["max_depth"] = max(self.used["max_depth"], depth)
++        paths = [[], []]
++        unknown = [False, False]
++        count = 0
++        # Select latest revision BEFORE testing retirement or target: never fall back.
++        justs = self.conn.execute(
++            "SELECT j.record_id FROM record j WHERE j.workspace_id=? AND j.kind='JUSTIFICATION'"
++            " AND j.sequence<=? AND json_extract(j.payload,'$.target_claim_id')=?"
++            " AND NOT EXISTS (SELECT 1 FROM record n WHERE n.workspace_id=j.workspace_id"
++            " AND n.object_id=j.object_id AND n.sequence<=?"
++            " AND (n.sequence>j.sequence OR (n.sequence=j.sequence AND n.rowid>j.rowid)))"
++            " ORDER BY j.sequence,j.rowid", (self.ws, self.as_of, rid, self.as_of))
++        for row in justs:
++            jid = row[0]
++            j, done = self.record(jid)
++            if not done:
++                unknown = [True, True]
++                break
++            if jid in self.retired or jid in self.purged:
++                continue
++            p = j["payload"]
++            prereq = self.conjunction(p.get("rule_refs", []) + p.get("assumption_refs", []),
++                                     depth, stack + (rid,))
++            if prereq is False:
++                continue
++            for side, name in enumerate(("support_groups", "refute_groups")):
++                for group in p.get(name, []):
++                    if not self.spend("paths"):
++                        unknown[side] = True
++                        break
++                    if not self.spend("recompute"):
++                        unknown[side] = True
++                        break
++                    count += 1
++                    value = self.conjunction(group, depth, stack + (rid,))
++                    if value is True and prereq is True:
++                        paths[side].append(list(group))
++                    elif value is not False:
++                        unknown[side] = True
++        result = self.result(rid, *paths, *unknown, count)
++        if not result["truncated"]:
++            self.results[cache_key] = result
++        return result
+ 
+-    每个 Justification 是独立的逻辑论证：其规则与假设只约束自身的支持组，
+-    论证自身被撤回则整条路径退出。不同论证之间为析取（评审反例：
+-    撤回 J1 的规则不得使 J2 的独立支持消失；撤回论证自身不得继续提供支持）。
+-    """
+-    b = dict(DEFAULT_BUDGET)
+-    b.update(budget or {})
+-    if as_of is None:
+-        row = conn.execute(
+-            "SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
+-        ).fetchone()
+-        as_of = row["head_sequence"] if row else 0
+-
+-    justs = conn.execute(
+-        "SELECT record_id, payload FROM record WHERE workspace_id=? AND kind='JUSTIFICATION'"
+-        " AND sequence<=? AND json_extract(payload, '$.target_claim_id')=?",
+-        (workspace_id, as_of, claim_record_id),
+-    ).fetchall()
+-
+-    supporting, refuting, evaluated, truncated = [], [], 0, False
+-    for j in justs:
+-        p = json.loads(j["payload"])
+-        # 论证自身被撤回：整条路径退出。论证被标记只表示其依赖有变更，
+-        # 成员资格在下方逐组重算——标记本身不使全部 OR 分支失效（TC-01 语义）
+-        if j["record_id"] in _retired_roots(conn, workspace_id):
+-            continue
+-        # 规则与假设按论证独立合取（不跨论证合并）
+-        prereq_ok = all(eligible(conn, workspace_id, r, as_of, _stack)
+-                        for r in (p.get("rule_refs") or []) + (p.get("assumption_refs") or []))
+-        if not prereq_ok:
+-            continue
+-        for groups, bucket in ((p.get("support_groups") or [], supporting),
+-                               (p.get("refute_groups") or [], refuting)):
+-            for g in groups:
+-                if evaluated >= b["max_paths"] or len(g) > b["max_depth"]:
+-                    truncated = True  # 超限不谎称完整证明（7.2 节）
+-                    break
+-                evaluated += 1
+-                if all(eligible(conn, workspace_id, m, as_of, _stack) for m in g):
+-                    bucket.append(list(g))
+-
+-    s = bool(supporting)
+-    r = bool(refuting)
+-    # 来源谱系：合格支持证据按根来源去重（TC-08）
+-    roots = {root_source(conn, m) for g in supporting for m in g}
+-
+-    return {
+-        "claim": claim_record_id,
+-        "four_state": FOUR_STATE[(s, r)],
+-        "supported": s,
+-        "refuted": r,
+-        "supporting_paths": supporting,
+-        "refuting_paths": refuting,
+-        "groups_evaluated": evaluated,
+-        "truncated": truncated,
+-        "independent_roots": sorted(roots),
+-        "independent_root_count": len(roots),
+-    }
++    @staticmethod
++    def result(rid, supporting, refuting, unknown_s, unknown_r, count):
++        s, r = bool(supporting), bool(refuting)
++        incomplete = unknown_s or unknown_r
++        return {"claim": rid, "four_state": "INCOMPLETE" if incomplete else FOUR_STATE[(s, r)],
++                "supported": s, "refuted": r, "supporting_paths": supporting,
++                "refuting_paths": refuting, "groups_evaluated": count,
++                "support": "FOUND" if s else "UNKNOWN" if unknown_s else "ABSENT",
++                "refutation": "FOUND" if r else "UNKNOWN" if unknown_r else "ABSENT",
++                "evaluation_status": "INCOMPLETE" if incomplete else "COMPLETE",
++                "truncated": incomplete}
++
++
++def eligible(conn, workspace_id, record_id, as_of=None, _stack=()):
++    evaluation = _Evaluation(conn, workspace_id, as_of, None)
++    return evaluation.member(record_id, 0, _stack) is True
++
++
++def eligible_new_task(conn, workspace_id, roots, as_of):
++    """Same depth and shared budget as member(task), before its immutable insert."""
++    evaluation = _Evaluation(conn, workspace_id, as_of, None)
++    if not evaluation.spend("recompute"):  # the new task's own record inspection
++        return False
++    return evaluation.conjunction(roots, 0, ()) is True
++
++
++def evaluate_support(conn, workspace_id, claim_record_id, as_of=None, budget=None, _stack=()):
++    evaluation = _Evaluation(conn, workspace_id, as_of, budget)
++    result = dict(evaluation.claim(claim_record_id, stack=_stack))
++    roots = {root_source(conn, m) for group in result["supporting_paths"] for m in group}
++    result.update(exhausted_budget=sorted(evaluation.exhausted), budget_used=dict(evaluation.used),
++                  lineage_rooted_support_items=sorted(roots),
++                  lineage_rooted_support_item_count=len(roots),
++                  support_provenance_scope="direct_members_with_explicit_lineage_only")
++    return result
+ 
+ 
+-def claim_four_state(conn, workspace_id: str, claim_record_id: str) -> str:
++def claim_four_state(conn, workspace_id, claim_record_id):
+     return evaluate_support(conn, workspace_id, claim_record_id)["four_state"]
+diff --git a/asg_kernel/asg/gateway.py b/asg_kernel/asg/gateway.py
+index 0730084..a16fa00 100644
+--- a/asg_kernel/asg/gateway.py
++++ b/asg_kernel/asg/gateway.py
+@@ -38,7 +38,8 @@ class ConnectorContract:
+     """连接器能力契约（5.6 节 / 6.2 节）：未声明的能力不得被运行时假设。"""
+     mode: str = "NONE"                       # KEYED / QUERY_ONLY / NONE
+     supports_job_query: bool = False
+-    final_query_guarantee: bool = False      # 查询覆盖范围、可见性与最终性
++    final_query_guarantee: bool = False      # Legacy metadata; never sufficient to release liability
++    supports_attempt_closure: bool = False  # Atomic remote close/query for an exact attempt
+ 
+ 
+ class Connector:
+@@ -56,6 +57,18 @@ class Connector:
+     def query_job(self, job_id: str) -> dict | None:
+         return None
+ 
++    def call_attempt(self, context: dict) -> dict | None:
++        """Closure-capable adapters MUST carry immutable attempt_id to the remote."""
++        return self.call(context["operation"], context["arguments"], context["idempotency_key"])
++
++    def close_attempt(self, key: str, attempt_id: str) -> dict | None:
++        """Atomically establish the effect or permanently forbid this attempt's send.
++
++        None means incomplete evidence. A negative result must name the closed
++        attempt. New attempts may reuse the logical key; closed IDs stay closed.
++        """
++        return None
++
+ 
+ def _head(conn, workspace_id: str) -> int:
+     row = conn.execute(
+@@ -156,9 +169,11 @@ class Gateway:
+                 raise AsgError("E401", "前置记录不存在", details={"missing": pid})
+             if row["kind"] == "CLAIM":
+                 ev = evaluate_support(conn, workspace_id, pid)
+-                if not (ev["supported"] and not ev["refuted"]):
++                if ev["truncated"] or not (ev["supported"] and not ev["refuted"]):
+                     raise AsgError("E401", "主张前提当前不成立（无合格正向支持或存在反证）",
+-                                   details={"claim": pid, "four_state": ev["four_state"]})
++                                   details={"claim": pid, "four_state": ev["four_state"],
++                                            "evaluation_status": ev["evaluation_status"],
++                                            "exhausted_budget": ev["exhausted_budget"]})
+             elif not eligible(conn, workspace_id, pid):
+                 raise AsgError("E401", "前置证据已撤回、失效或删除", details={"record": pid})
+ 
+@@ -225,6 +240,8 @@ class Gateway:
+                 "SELECT * FROM attempt WHERE intent_id=?", (intent_id,)
+             ).fetchall()
+             contract = payload.get("idempotency_contract", {})
++            if len(prior) >= contract.get("retry_policy", {}).get("max", 1):
++                raise AsgError("E604", "Attempt budget exhausted; dispatch forbidden")
+             mode = contract.get("mode", "NONE")
+             if prior and mode == "NONE":
+                 self._abandon_in_txn(conn, workspace_id, intent_id,
+@@ -327,6 +344,7 @@ class Gateway:
+                 "classification_basis": {
+                     "contract_mode": (payload.get("idempotency_contract") or {}).get("mode"),
+                     "clause": response.get("clause", "连接器契约条款"),
++                    "closed_attempt_id": response.get("closed_attempt_id"),
+                 },
+                 "evidence_observation_id": obs_rid,
+                 "recorded_by": self.principal,
+@@ -494,10 +512,22 @@ class Gateway:
+             else:
+                 raise AsgError("E606", "无可信对账通道（无幂等键且查询不受支持）")
+ 
+-        if response is None:
+-            if connector.contract.final_query_guarantee:
+-                response = {"outcome": "CONFIRMED_NOT_APPLIED", "external_job_id": None,
+-                            "clause": f"{basis}: 契约保证查询覆盖范围、可见性与最终性，查无即未生效"}
++        if response is None or response.get("outcome") == "CONFIRMED_NOT_APPLIED":
++            if mode == "KEYED" and key and not key_expired and connector.contract.supports_attempt_closure:
++                attempts = self.conn.execute("SELECT attempt_id FROM attempt WHERE intent_id=?"
++                                              " ORDER BY started_at,rowid", (intent_id,)).fetchall()
++                if not attempts:
++                    raise AsgError("E606", "No persisted attempt to close")
++                for attempt in attempts:
++                    aid = attempt["attempt_id"]
++                    closed = connector.close_attempt(key, aid)
++                    if closed is None or closed.get("outcome") not in {
++                            "CONFIRMED_SUCCEEDED", "CONFIRMED_NOT_APPLIED"}:
++                        raise AsgError("E606", "Remote attempt closure is incomplete; retain liability")
++                    if closed["outcome"] == "CONFIRMED_NOT_APPLIED" and closed.get("closed_attempt_id") != aid:
++                        raise AsgError("E606", "Missing exact remote attempt closure evidence")
++                    state = self.record_response(workspace_id, aid, closed)
++                return state
+             elif mode == "NONE":
+                 # 无幂等契约且无法对账：自动重发本身被禁止（E604），不是查询不完整（E606）
+                 raise AsgError("E604", "无幂等契约且无法对账，默认暂停自动重发")
+@@ -544,6 +574,10 @@ class Gateway:
+                                     "CANCELLED_BEFORE_DISPATCH"):
+             payload, _ = _load_intent(self.conn, ws, iid)
+             contract = payload.get("idempotency_contract") or {}
++            attempts_count = self.conn.execute("SELECT attempts_count FROM effect_outbox"
++                                                " WHERE intent_id=?", (iid,)).fetchone()[0]
++            retry_due = (eff["state"] == "CONFIRMED_NOT_APPLIED" and
++                         attempts_count < contract.get("retry_policy", {}).get("max", 1))
+             mode = contract.get("mode", "NONE")
+             key = contract.get("key")
+             fresh = None
+@@ -555,6 +589,10 @@ class Gateway:
+                 or (eff["state"] == "CONFIRMED_NOT_APPLIED"
+                     and fresh and fresh.get("outcome") == "CONFIRMED_SUCCEEDED")
+             )
++            if retry_due and not contradicts:
++                # claim() proves durable scheduling requested work. A negative
++                # attempt outcome does not terminate the logical intent.
++                return self._dispatch(ws, iid, token, connector)
+             with write_txn(self.conn) as conn:
+                 if contradicts:
+                     conn.execute(
+@@ -624,7 +662,7 @@ class Gateway:
+     def _dispatch(self, workspace_id: str, intent_id: str, token: str,
+                   connector: Connector) -> dict:
+         ctx = self.begin_attempt(workspace_id, intent_id, token)   # 事务内：先记录
+-        response = connector.call(ctx["operation"], ctx["arguments"], ctx["idempotency_key"])
++        response = connector.call_attempt(ctx)
+         if response is None:                                        # 事务外：再外呼
+             state = self.mark_no_response(workspace_id, ctx["attempt_id"])
+         else:
+diff --git a/asg_kernel/asg/invalidation.py b/asg_kernel/asg/invalidation.py
+index a92857c..a4368ed 100644
+--- a/asg_kernel/asg/invalidation.py
++++ b/asg_kernel/asg/invalidation.py
+@@ -11,9 +11,11 @@
+ """
+ from __future__ import annotations
+ 
++import json
+ import sqlite3
+ from datetime import datetime, timezone
+ 
++from .dependencies import closure, load_graph, current_stamp
+ from .errors import AsgError
+ from .storage import write_txn
+ 
+@@ -39,7 +41,8 @@ def _head(conn, workspace_id: str) -> int:
+     return row["head_sequence"] if row else 0
+ 
+ 
+-def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int = 32) -> int:
++def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int = 32,
++                  metrics: dict | None = None) -> int:
+     """传播工作者：逐条处理失效队列，按反向依赖闭包打标；队列清空后推进水位。"""
+     processed = 0
+     while processed < max_items:
+@@ -49,58 +52,61 @@ def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int =
+                 " ORDER BY item_id LIMIT 1", (workspace_id,),
+             ).fetchone()
+             if item is None:
++                # Dependencies may have been appended after an earlier withdrawal
++                # was drained. Recompute the current graph before declaring it caught up.
++                for retired in tx.execute(
++                    "SELECT root_record_id, MAX(epoch) AS epoch FROM invalidation_queue"
++                    " WHERE workspace_id=? GROUP BY root_record_id", (workspace_id,),
++                ).fetchall():
++                    _propagate_closure(tx, workspace_id, retired["root_record_id"], retired["epoch"], metrics)
++                _refresh_tasks(tx, workspace_id, metrics=metrics)
+                 _advance_watermark(tx, workspace_id)
+                 break
+             tx.execute("UPDATE invalidation_queue SET status='PROCESSING' WHERE item_id=?",
+                        (item["item_id"],))
+-            _propagate_closure(tx, workspace_id, item["root_record_id"], item["epoch"])
++            _propagate_closure(tx, workspace_id, item["root_record_id"], item["epoch"], metrics)
+             tx.execute("UPDATE invalidation_queue SET status='DONE' WHERE item_id=?",
+                        (item["item_id"],))
+             processed += 1
+     return processed
+ 
+ 
+-def _propagate_closure(tx, workspace_id: str, root_record_id: str, epoch: int) -> int:
++def _propagate_closure(tx, workspace_id: str, root_record_id: str, epoch: int, metrics=None) -> int:
+     """反向依赖闭包：root 自身与全部上游依赖者打标（via 为其直接依赖的下游记录）。"""
+-    visited = {root_record_id}
+-    frontier = [root_record_id]
+-    affected = 0
+-    while frontier:
+-        q = ", ".join("?" * len(frontier))
+-        rows = tx.execute(
+-            f"SELECT src_record_id, dst_record_id, ref_role FROM record_ref"
+-            f" WHERE dst_record_id IN ({q}) AND ref_layer IN {PROPAGATING_LAYERS}",
+-            tuple(frontier),
+-        ).fetchall()
+-        next_frontier = []
+-        for r in rows:
+-            src = r["src_record_id"]
+-            if src in visited:
+-                continue
+-            visited.add(src)
+-            next_frontier.append(src)
+-            tx.execute(
+-                "INSERT OR IGNORE INTO invalidation_mark (workspace_id, record_id,"
+-                " via_record_id, path_role, epoch) VALUES (?,?,?,?,?)",
+-                (workspace_id, src, r["dst_record_id"], r["ref_role"], epoch),
+-            )
+-            affected += 1
+-            kind = tx.execute("SELECT kind FROM record WHERE record_id=?", (src,)).fetchone()
+-            if kind is None:
+-                continue
+-            if kind["kind"] == "TASK_REVISION":
+-                # 任务前提命中失效：进入待重评（6.5 节）
+-                tx.execute(
+-                    "UPDATE task_state SET status='PENDING_REEVALUATION',"
+-                    " reevaluation_reason=? WHERE workspace_id=? AND task_object_id IN"
+-                    " (SELECT object_id FROM record WHERE record_id=?)"
+-                    " AND status IN ('DRAFT','ACTIVE')",
+-                    (f"invalidated_via:{root_record_id}", workspace_id, src),
+-                )
+-            # CLAIM / JUSTIFICATION / CONTEXT_MANIFEST 命中标记即可：
+-            # 求值按成员资格精确重算（7.2 节），清单读取按 mark 判过期
+-        frontier = next_frontier
+-    return affected
++    reached = closure(load_graph(tx, workspace_id, metrics=metrics), [root_record_id])
++    if metrics is not None:
++        metrics["closure_nodes_visited"] = metrics.get("closure_nodes_visited", 0) + len(reached)
++    for src, (via, role) in reached.items():
++        tx.execute(
++            "INSERT OR IGNORE INTO invalidation_mark (workspace_id, record_id,"
++            " via_record_id, path_role, epoch) VALUES (?,?,?,?,?)",
++            (workspace_id, src, via, role, epoch),
++        )
++        tx.execute(
++            "UPDATE task_state SET status='PENDING_REEVALUATION', reevaluation_reason=?"
++            " WHERE workspace_id=? AND task_object_id IN"
++            " (SELECT object_id FROM record WHERE record_id=? AND kind='TASK_REVISION'"
++            " AND json_extract(payload,'$._validation') IS NULL)"
++            " AND current_revision=?"
++            " AND status IN ('DRAFT','ACTIVE')",
++            (f"invalidated_via:{root_record_id}", workspace_id, src, src),
++        )
++    _refresh_tasks(tx, workspace_id, f"invalidated_via:{root_record_id}", metrics)
++    return len(reached)
++
++
++def _refresh_tasks(conn, workspace_id, reason="dependency_changed", metrics=None):
++    for row in conn.execute(
++        "SELECT r.payload,r.record_id,t.task_object_id FROM task_state t JOIN record r"
++        " ON r.record_id=t.current_revision WHERE t.workspace_id=?"
++        " AND t.status IN ('ACTIVE','DRAFT')", (workspace_id,)).fetchall():
++        validation = json.loads(row["payload"]).get("_validation")
++        from .evidence import eligible
++        if validation and (not eligible(conn, workspace_id, row["record_id"]) or
++                           validation["stamp"] != current_stamp(conn, workspace_id, validation["roots"], metrics)):
++            conn.execute("UPDATE task_state SET status='PENDING_REEVALUATION',"
++                         " reevaluation_reason=? WHERE workspace_id=? AND task_object_id=?",
++                         (reason, workspace_id, row["task_object_id"]))
+ 
+ 
+ def _advance_watermark(tx, workspace_id: str) -> None:
+@@ -116,13 +122,13 @@ def _advance_watermark(tx, workspace_id: str) -> None:
+         " VALUES (?,?,?,?)"
+         " ON CONFLICT(index_name) DO UPDATE SET applied_sequence=excluded.applied_sequence,"
+         " validation_epoch=excluded.validation_epoch, updated_at=excluded.updated_at",
+-        (PROJECTION_INDEX, _head(tx, workspace_id), _epoch(tx, workspace_id), _now()),
++        (PROJECTION_INDEX + ":" + workspace_id, _head(tx, workspace_id), _epoch(tx, workspace_id), _now()),
+     )
+ 
+ 
+-def watermark(conn: sqlite3.Connection) -> dict | None:
++def watermark(conn: sqlite3.Connection, workspace_id: str) -> dict | None:
+     row = conn.execute(
+-        "SELECT * FROM index_watermark WHERE index_name=?", (PROJECTION_INDEX,)
++        "SELECT * FROM index_watermark WHERE index_name=?", (PROJECTION_INDEX + ":" + workspace_id,)
+     ).fetchone()
+     if row is None:
+         return None
+@@ -140,7 +146,7 @@ def read_gate(conn: sqlite3.Connection, workspace_id: str, deps: list[str],
+     ).fetchall()]
+     hit = sorted(set(deps) & set(pending_roots)) if deps else []
+     ws_epoch = _epoch(conn, workspace_id)
+-    wm = watermark(conn)
++    wm = watermark(conn, workspace_id)
+     wm_epoch = wm["validation_epoch"] if wm else 1
+ 
+     if purpose == "critical":
+@@ -153,6 +159,10 @@ def read_gate(conn: sqlite3.Connection, workspace_id: str, deps: list[str],
+         if ws_epoch > wm_epoch:
+             raise AsgError("E401", "投影水位落后于验证纪元",
+                            details={"watermark_epoch": wm_epoch, "workspace_epoch": ws_epoch})
++        from .evidence import eligible
++        invalid = [rid for rid in deps if not eligible(conn, workspace_id, rid)]
++        if invalid:
++            raise AsgError("E401", "关键读取依赖无效或求值不完整", details={"invalid": invalid})
+         return {"stale": False}
+     return {"stale": bool(hit or pending_roots or ws_epoch > wm_epoch),
+             "reason": "invalidation_pending" if (hit or pending_roots) else "watermark_behind"
+diff --git a/asg_kernel/asg/projection.py b/asg_kernel/asg/projection.py
+index e7e178e..3a8fd32 100644
+--- a/asg_kernel/asg/projection.py
++++ b/asg_kernel/asg/projection.py
+@@ -8,6 +8,113 @@ from __future__ import annotations
+ import json
+ import sqlite3
+ 
++from .dependencies import closure, reverse_dependencies, dependency_stamp
++
++
++def reducer_v3(records: list[dict], refs: list[dict] | None = None) -> dict:
++    """reducer 版本 3：按提交序重放 object_heads 与 task_state。
++
++    refs 为引用边（src/role/dst）；失效标记记录（RETIRE_PURGE_MARK）经 depends_on
++    边把依赖任务重建为 PENDING_REEVALUATION（评审反例：在线 PENDING_REEVALUATION、
++    回放仍 ACTIVE）。在线传播与回放使用同一规则。
++    """
++    heads: dict[str, dict] = {}
++    tasks: dict[str, dict] = {}
++    record_by_id: dict[str, dict] = {}
++    for rec in records:
++        ws, obj, rid, seq = rec["workspace_id"], rec["object_id"], rec["record_id"], rec["sequence"]
++        record_by_id[rid] = rec
++        cur = heads.get((ws, obj))
++        if cur is None or seq >= cur["head_sequence"]:
++            heads[(ws, obj)] = {"head_record_id": rid, "head_sequence": seq}
++        if rec["kind"] == "TASK_REVISION":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            task_obj = rec["object_id"]
++            if payload["task_object_id"] != task_obj:
++                raise ValueError("Task identity mismatch in replay input")
++            prev = tasks.get((ws, task_obj), {"status": "DRAFT"})
++            status = payload.get("_validation", {}).get("status") or (
++                "ACTIVE" if prev["status"] in ("DRAFT",) else prev["status"])
++            tasks[(ws, task_obj)] = {"status": status, "current_revision": rid}
++    # 失效标记重建任务重评：标记目标命中任务依赖闭包即进入待重评
++    retired = set()
++    for rec in records:
++        if rec["kind"] == "RETIRE_PURGE_MARK":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            retired.add(payload["target"]["record_id"])
++    affected = closure(reverse_dependencies(records, refs or []), retired)
++    for rid in affected:
++        rec = record_by_id[rid]
++        if rec["kind"] == "TASK_REVISION":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            st = tasks[(rec["workspace_id"], payload["task_object_id"])]
++            current = record_by_id[st["current_revision"]]
++            cp = json.loads(current["payload"]) if isinstance(current["payload"], str) else current["payload"]
++            if "_validation" in cp:
++                continue
++            if st["status"] == "ACTIVE":
++                st["status"] = "PENDING_REEVALUATION"
++    for st in tasks.values():
++        rec = record_by_id[st["current_revision"]]
++        p = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++        validation = p.get("_validation")
++        if validation and (rec["record_id"] in retired or
++                           validation["stamp"] != dependency_stamp(records, refs or [], validation["roots"])):
++            st["status"] = "PENDING_REEVALUATION"
++    return {"object_heads": {f"{k[0]}:{k[1]}": v for k, v in heads.items()},
++            "task_state": {f"{k[0]}:{k[1]}": v for k, v in tasks.items()}}
++
++
++def reducer_v2(records: list[dict], refs: list[dict] | None = None) -> dict:
++    """reducer 版本 2：按提交序重放 object_heads 与 task_state。
++
++    refs 为引用边（src/role/dst）；失效标记记录（RETIRE_PURGE_MARK）经 depends_on
++    边把依赖任务重建为 PENDING_REEVALUATION（评审反例：在线 PENDING_REEVALUATION、
++    回放仍 ACTIVE）。在线传播与回放使用同一规则。
++    """
++    heads: dict[str, dict] = {}
++    tasks: dict[str, dict] = {}
++    record_by_id: dict[str, dict] = {}
++    for rec in records:
++        ws, obj, rid, seq = rec["workspace_id"], rec["object_id"], rec["record_id"], rec["sequence"]
++        record_by_id[rid] = rec
++        cur = heads.get((ws, obj))
++        if cur is None or seq >= cur["head_sequence"]:
++            heads[(ws, obj)] = {"head_record_id": rid, "head_sequence": seq}
++        if rec["kind"] == "TASK_REVISION":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            task_obj = payload["task_object_id"]
++            prev = tasks.get((ws, task_obj), {"status": "DRAFT"})
++            status = payload.get("_validation", {}).get("status") or (
++                "ACTIVE" if prev["status"] in ("DRAFT",) else prev["status"])
++            tasks[(ws, task_obj)] = {"status": status, "current_revision": rid}
++    # 失效标记重建任务重评：标记目标命中任务依赖闭包即进入待重评
++    retired = set()
++    for rec in records:
++        if rec["kind"] == "RETIRE_PURGE_MARK":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            retired.add(payload["target"]["record_id"])
++    affected = closure(reverse_dependencies(records, refs or []), retired)
++    for rid in affected:
++        rec = record_by_id[rid]
++        if rec["kind"] == "TASK_REVISION":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            st = tasks[(rec["workspace_id"], payload["task_object_id"])]
++            current = record_by_id[st["current_revision"]]
++            cp = json.loads(current["payload"]) if isinstance(current["payload"], str) else current["payload"]
++            if "_validation" in cp:
++                continue
++            if st["status"] == "ACTIVE":
++                st["status"] = "PENDING_REEVALUATION"
++    for st in tasks.values():
++        rec = record_by_id[st["current_revision"]]
++        p = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++        validation = p.get("_validation")
++        if validation and validation["stamp"] != dependency_stamp(records, refs or [], validation["roots"]):
++            st["status"] = "PENDING_REEVALUATION"
++    return {"object_heads": {f"{k[0]}:{k[1]}": v for k, v in heads.items()},
++            "task_state": {f"{k[0]}:{k[1]}": v for k, v in tasks.items()}}
++
+ 
+ def reducer_v1(records: list[dict], refs: list[dict] | None = None) -> dict:
+     """reducer 版本 1：按提交序重放 object_heads 与 task_state。
+@@ -16,9 +123,10 @@ def reducer_v1(records: list[dict], refs: list[dict] | None = None) -> dict:
+     边把依赖任务重建为 PENDING_REEVALUATION（评审反例：在线 PENDING_REEVALUATION、
+     回放仍 ACTIVE）。在线传播与回放使用同一规则。
+     """
++    from .legacy_dependencies_v1 import closure, reverse_dependencies
++
+     heads: dict[str, dict] = {}
+     tasks: dict[str, dict] = {}
+-    task_deps: dict[str, set] = {}   # task_record_id -> 依赖的记录 id 集
+     record_by_id: dict[str, dict] = {}
+     for rec in records:
+         ws, obj, rid, seq = rec["workspace_id"], rec["object_id"], rec["record_id"], rec["sequence"]
+@@ -32,19 +140,20 @@ def reducer_v1(records: list[dict], refs: list[dict] | None = None) -> dict:
+             prev = tasks.get((ws, task_obj), {"status": "DRAFT"})
+             status = "ACTIVE" if prev["status"] in ("DRAFT",) else prev["status"]
+             tasks[(ws, task_obj)] = {"status": status, "current_revision": rid}
+-    for ref in refs or []:
+-        if ref["role"] == "depends_on":
+-            task_deps.setdefault(ref["src"], set()).add(ref["dst"])
+     # 失效标记重建任务重评：标记目标命中任务依赖闭包即进入待重评
+     retired = set()
+     for rec in records:
+         if rec["kind"] == "RETIRE_PURGE_MARK":
+             payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
+             retired.add(payload["target"]["record_id"])
+-    for (ws, task_obj), st in tasks.items():
+-        deps = task_deps.get(st["current_revision"], set())
+-        if deps & retired and st["status"] == "ACTIVE":
+-            st["status"] = "PENDING_REEVALUATION"
++    affected = closure(reverse_dependencies(records, refs or []), retired)
++    for rid in affected:
++        rec = record_by_id[rid]
++        if rec["kind"] == "TASK_REVISION":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            st = tasks[(rec["workspace_id"], payload["task_object_id"])]
++            if st["status"] == "ACTIVE":
++                st["status"] = "PENDING_REEVALUATION"
+     return {"object_heads": {f"{k[0]}:{k[1]}": v for k, v in heads.items()},
+             "task_state": {f"{k[0]}:{k[1]}": v for k, v in tasks.items()}}
+ 
+@@ -53,7 +162,8 @@ class Projection:
+     def __init__(self, conn: sqlite3.Connection):
+         self.conn = conn
+ 
+-    def replay(self, workspace_id: str, upto_sequence: int | None = None) -> dict:
++    def replay(self, workspace_id: str, upto_sequence: int | None = None,
++               reducer_version: int = 3) -> dict:
+         """确定性回放（7.9 节）：按序应用已记录输入重建投影。"""
+         q = ("SELECT * FROM record WHERE workspace_id=? ORDER BY sequence, rowid")
+         rows = self.conn.execute(q, (workspace_id,)).fetchall()
+@@ -72,7 +182,9 @@ class Projection:
+                     " JOIN record r ON r.record_id = rr.src_record_id"
+                     " WHERE r.workspace_id=?", (workspace_id,)).fetchall()
+                 if upto_sequence is None or self._seq(r["src_record_id"]) <= upto_sequence]
+-        return reducer_v1(recs, refs)
++        if reducer_version not in (1, 2, 3):
++            raise ValueError("Unsupported reducer version")
++        return {1: reducer_v1, 2: reducer_v2, 3: reducer_v3}[reducer_version](recs, refs)
+ 
+     def _seq(self, record_id: str) -> int:
+         row = self.conn.execute("SELECT sequence FROM record WHERE record_id=?",
+diff --git a/asg_kernel/asg/purge.py b/asg_kernel/asg/purge.py
+index 489a70a..fae3b58 100644
+--- a/asg_kernel/asg/purge.py
++++ b/asg_kernel/asg/purge.py
+@@ -13,6 +13,7 @@ from __future__ import annotations
+ import json
+ from datetime import datetime, timezone
+ 
++from .dependencies import closure, load_graph
+ from .errors import AsgError
+ from .ids import digest_obj, uuid7
+ from .storage import write_txn
+@@ -41,6 +42,8 @@ class Purger:
+                 row = conn.execute("SELECT * FROM record WHERE record_id=?", (rid,)).fetchone()
+                 if row is None:
+                     raise AsgError("E801", f"范围解析失败，记录不存在: {rid}")
++                if row["workspace_id"] != workspace_id:
++                    raise AsgError("E303", "删除目标不属于当前工作空间")
+                 targets.append(row)
+             marks = [{
+                 "workspace_id": workspace_id,
+@@ -56,7 +59,7 @@ class Purger:
+             } for t in targets]
+             # commit_in_txn 内部落失效根入队与 epoch 推进（阶段 A/B 已有路径）
+             result = self.svc.commit_in_txn(conn, workspace_id, "main", marks,
+-                                            expected_head, request_id)
++                                            expected_head, request_id, principal=principal)
+             if mode == "purge":
+                 conn.execute(
+                     "UPDATE workspace_epoch SET policy_epoch = policy_epoch + 1"
+@@ -64,7 +67,11 @@ class Purger:
+                 pe = conn.execute(
+                     "SELECT policy_epoch FROM workspace_epoch WHERE workspace_id=?",
+                     (workspace_id,)).fetchone()["policy_epoch"]
+-                for t in targets:
++                affected_ids = closure(load_graph(conn, workspace_id, lineage_only=True),
++                                       [t["record_id"] for t in targets])
++                isolated = [conn.execute("SELECT * FROM record WHERE record_id=?", (rid,)).fetchone()
++                            for rid in affected_ids]
++                for t in isolated:
+                     # 墓碑按稳定内容身份登记（来源+片段），与复活检查同一口径
+                     p = json.loads(t["payload"]) if t["kind"] == "OBSERVATION" else None
+                     content_id = (digest_obj({"source": p.get("source"), "span": p.get("span")})
+@@ -76,23 +83,8 @@ class Purger:
+                         (workspace_id, t["object_id"], t["record_id"], content_id,
+                          t["policy_domain"], _now(), pe),
+                     )
+-                    # 派生副本隔离：显式声明派生自被删记录的在线副本同步墓碑
+-                    # （正文再生完成前先隔离，评审反例：派生副本仍可读）
+-                    for d in conn.execute(
+-                        "SELECT r.record_id, r.object_id, r.payload_digest, r.policy_domain"
+-                        " FROM record_ref rr JOIN record r ON r.record_id = rr.src_record_id"
+-                        " WHERE rr.dst_record_id=? AND rr.ref_role IN"
+-                        " ('derived_from','extracted_from','transcribed_from')",
+-                        (t["record_id"],),
+-                    ).fetchall():
+-                        conn.execute(
+-                            "INSERT OR IGNORE INTO tombstone (workspace_id, object_id, record_id,"
+-                            " payload_digest, policy_domain, mode, purged_at, policy_epoch)"
+-                            " VALUES (?,?,?,?,?, 'purge', ?, ?)",
+-                            (workspace_id, d["object_id"], d["record_id"], d["payload_digest"],
+-                             d["policy_domain"], _now(), pe),
+-                        )
+-        cleanup = self._cleanup_online(targets) if mode == "purge" else {"blobs": 0}
++        if mode == "purge":
++            self._cleanup_online(isolated)
+         return {"commit_id": result["commit_id"], "sequence": result["sequence"],
+                 "mode": mode, "targets": [t["record_id"] for t in targets],
+                 "derived_regeneration_plan": self._regeneration_plan(workspace_id, targets)
+@@ -107,27 +99,16 @@ class Purger:
+                 ("inline:" + t["record_id"],),
+             )
+             n += cur.rowcount
+-            for d in self.conn.execute(
+-                "SELECT src_record_id FROM record_ref WHERE dst_record_id=? AND ref_role IN"
+-                " ('derived_from','extracted_from','transcribed_from')", (t["record_id"],),
+-            ).fetchall():
+-                cur = self.conn.execute(
+-                    "UPDATE blob_object SET deletion_state='purged' WHERE storage_uri=?",
+-                    ("inline:" + d["src_record_id"],),
+-                )
+-                n += cur.rowcount
+         return {"blobs": n}
+ 
+     def _regeneration_plan(self, workspace_id: str, targets) -> list[dict]:
+         """派生再生计划：仍获准使用的证据重新生成干净派生内容（9.4 节）。"""
+         plan = []
++        graph = load_graph(self.conn, workspace_id, lineage_only=True)
+         for t in targets:
+-            dependents = self.conn.execute(
+-                "SELECT DISTINCT src_record_id FROM record_ref WHERE dst_record_id=?",
+-                (t["record_id"],),
+-            ).fetchall()
++            dependents = set(closure(graph, [t["record_id"]])) - {t["record_id"]}
+             plan.append({"purged": t["record_id"],
+-                         "dependents_to_regenerate": [d["src_record_id"] for d in dependents]})
++                         "dependents_to_regenerate": sorted(dependents)})
+         return plan
+ 
+     def read_record(self, workspace_id: str, record_id: str) -> dict:
+@@ -135,6 +116,8 @@ class Purger:
+         row = self.conn.execute("SELECT * FROM record WHERE record_id=?", (record_id,)).fetchone()
+         if row is None:
+             raise AsgError("E801", f"记录不存在: {record_id}")
++        if row["workspace_id"] != workspace_id:
++            raise AsgError("E303", "读取目标不属于当前工作空间")
+         hit = self.conn.execute(
+             "SELECT 1 FROM tombstone WHERE workspace_id=? AND record_id=?",
+             (workspace_id, record_id),
+diff --git a/asg_kernel/asg/registry.py b/asg_kernel/asg/registry.py
+index 88c65dc..3d64999 100644
+--- a/asg_kernel/asg/registry.py
++++ b/asg_kernel/asg/registry.py
+@@ -5,12 +5,15 @@
+ """
+ from __future__ import annotations
+ 
++from copy import deepcopy
++
+ from .errors import AsgError
+ 
+ # ── 关系角色 -> 层（3.13 节注册表） ──────────────────────
+ ROLE_LAYER = {
+     # DERIVATION：版本与已声明派生，DAG
+     "supersedes": "DERIVATION",
++    "prior_revision": "DERIVATION",
+     "derived_from": "DERIVATION",
+     "extracted_from": "DERIVATION",
+     "transcribed_from": "DERIVATION",
+@@ -21,6 +24,7 @@ ROLE_LAYER = {
+     "same_entity_candidate": "SEMANTIC",
+     # CONTROL：控制与执行，按状态机验证
+     "supports": "CONTROL",
++    "targets_claim": "CONTROL",
+     "refutes": "CONTROL",
+     "depends_on": "CONTROL",
+     "precondition_of": "CONTROL",
+@@ -68,7 +72,7 @@ KIND_SPECS = {
+     "JUSTIFICATION": {
+         "phase": "C",
+         "required": {"target_claim_id": str, "support_groups": list, "refute_groups": list},
+-        "roles": {"supports", "refutes", "uses_version"},
++        "roles": {"supports", "refutes", "uses_version", "targets_claim", "supersedes"},
+     },
+     "ASSESSMENT": {
+         "phase": "C",
+@@ -101,7 +105,7 @@ KIND_SPECS = {
+         "phase": "B",
+         "required": {"attempt_id": str, "outcome": str, "classification_basis": dict,
+                      "evidence_observation_id": str, "recorded_by": dict},
+-        "roles": {"receipt_of"},
++        "roles": {"receipt_of", "uses_version"},
+     },
+     "ARTIFACT": {
+         "phase": "B",
+@@ -159,6 +163,8 @@ def validate_record(rec: dict) -> None:
+             raise AsgError("E101", f"{kind} 载荷缺少必填字段: {fname}")
+         if ftype is not None and not isinstance(payload[fname], ftype):
+             raise AsgError("E101", f"{kind} 载荷字段 {fname} 类型应为 {ftype.__name__}")
++    if kind == "TASK_REVISION" and payload["task_object_id"] != rec["object_id"]:
++        raise AsgError("E101", "TaskRevision task_object_id must equal envelope object_id")
+     if not payload.get("acceptance_refs", True):  # 非空列表检查（acceptance_refs 须非空）
+         if "acceptance_refs" in spec["required"]:
+             raise AsgError("E101", "TASK_REVISION 的 acceptance_refs 不得为空")
+@@ -174,7 +180,87 @@ def validate_record(rec: dict) -> None:
+         role = ref.get("role")
+         if role not in ROLE_LAYER:
+             raise AsgError("E101", f"未注册的引用角色: {role}")
+-        if role not in allowed_roles:
++        if role not in allowed_roles and role != "prior_revision":
+             raise AsgError("E101", f"{kind} 不允许发出引用角色 {role}")
+         if "target_record_id" not in ref:
+             raise AsgError("E101", "typed_refs 每项必须包含 target_record_id")
++
++
++# Only these fields contain record IDs. Operation/job IDs and legacy symbolic
++# task_revision_id/acceptance_refs are not silently interpreted as record IDs.
++REFERENCE_FIELDS = {
++    "JUSTIFICATION": {"target_claim_id": ("targets_claim", "one"),
++                      "support_groups": ("supports", "groups"),
++                      "refute_groups": ("refutes", "groups"),
++                      "rule_refs": ("uses_version", "many"),
++                      "assumption_refs": ("uses_version", "many")},
++    "OBSERVATION": {role: (role, "many") for role in
++                    ("derived_from", "extracted_from", "transcribed_from")},
++    "TASK_REVISION": {"dependency_refs": ("depends_on", "many")},
++    "ACTION_INTENT": {"precondition_refs": ("uses_version", "many")},
++    "RETIRE_PURGE_MARK": {"target.record_id": ("uses_version", "one")},
++    "ASSESSMENT": {"target_record_id": ("uses_version", "one")},
++    "RECEIPT": {"evidence_observation_id": ("uses_version", "one")},
++    "CONTEXT_MANIFEST": {"selected_items": ("selected_into", "items")},
++}
++
++
++def normalize_record(record):
++    """Fill missing edges, reject conflicting edges, persist parent edges.
++
++    Normalization is server-side and never modifies the caller's request object.
++    Request idempotency remains based on the original request bytes/structure.
++    """
++    rec = deepcopy(record)
++    validate_record(rec)
++    p = rec["payload"]
++    refs = rec.get("typed_refs", [])
++    if rec["kind"] == "JUSTIFICATION":
++        # Previous justify() encoded the target using supports. Migrate that
++        # redundant representation; target is no longer a supporting member.
++        target = p["target_claim_id"]
++        members = {m for g in p["support_groups"] if isinstance(g, list) for m in g}
++        refs = [r for r in refs if not (r["role"] == "supports"
++                and r["target_record_id"] == target and target not in members)]
++    expected, managed = set(), set()
++    for field, (role, shape) in REFERENCE_FIELDS.get(rec["kind"], {}).items():
++        value = p
++        for part in field.split("."):
++            value = value.get(part) if isinstance(value, dict) else None
++        if value is None:
++            # Optional fields may be supplied through typed_refs; persist one
++            # canonical payload description as well, where no role is shared.
++            if rec["kind"] in {"OBSERVATION", "TASK_REVISION", "ACTION_INTENT"}:
++                value = [r["target_record_id"] for r in refs if r["role"] == role]
++                p[field] = value
++            else:
++                value = []
++        if shape == "one":
++            values = [value]
++        elif shape == "groups":
++            if not isinstance(value, list) or any(not isinstance(g, list) or not g for g in value):
++                raise AsgError("E101", f"{field} must contain nonempty AND groups")
++            values = [m for group in value for m in group]
++        elif shape == "items":
++            if not isinstance(value, list) or any(not isinstance(v, dict) for v in value):
++                raise AsgError("E101", f"Invalid {field}")
++            values = [v.get("record_id") for v in value]
++        else:
++            values = value
++        if not isinstance(values, list) or any(not isinstance(v, str) or not v for v in values):
++            raise AsgError("E101", f"{field} must contain record IDs")
++        managed.add(role)
++        expected.update((role, v) for v in values)
++    supplied = {(r["role"], r["target_record_id"]) for r in refs}
++    extras = {edge for edge in supplied if edge[0] in managed} - expected
++    if extras:
++        raise AsgError("E101", "Payload references disagree with typed_refs", details={"extra": sorted(extras)})
++    parents = rec.get("prior_revision_ids", [])
++    if not isinstance(parents, list) or any(not isinstance(v, str) or not v for v in parents):
++        raise AsgError("E101", "prior_revision_ids must contain record IDs")
++    parents = set(parents) | {dst for role, dst in supplied if role in {"supersedes", "prior_revision"}}
++    rec["prior_revision_ids"] = sorted(parents)
++    edges = supplied | expected | {("prior_revision", v) for v in parents}
++    rec["typed_refs"] = [{"role": role, "target_record_id": dst} for role, dst in sorted(edges)]
++    validate_record(rec)
++    return rec
+diff --git a/asg_kernel/asg/write_service.py b/asg_kernel/asg/write_service.py
+index 6a60dbd..5ffdac4 100644
+--- a/asg_kernel/asg/write_service.py
++++ b/asg_kernel/asg/write_service.py
+@@ -19,7 +19,7 @@ from .errors import AsgError
+ from .ids import digest_obj, uuid7
+ from .storage import write_txn
+ 
+-REDUCER_VERSION = 1
++REDUCER_VERSION = 3
+ 
+ 
+ def _now() -> str:
+@@ -52,6 +52,11 @@ class WriteService:
+         request_digest = request_digest or digest_obj(records)
+         principal = principal or {"kind": "service", "id": "write-service"}
+ 
++        if branch_id != "main":
++            raise AsgError("E104", f"分支 {branch_id!r} 尚未支持，当前仅接受 main")
++        if request_digest != digest_obj(records):
++            raise AsgError("E202", "请求摘要与记录内容不一致")
++
+         # 快速路径：事务外先查幂等（摘要由服务计算，调用方传入值仅供比对）
+         row = self.conn.execute(
+             'SELECT * FROM "commit" WHERE workspace_id=? AND request_id=?',
+@@ -106,12 +111,14 @@ class WriteService:
+             raise _EarlyExit(self._commit_result(dup, replayed=True))
+ 
+         # schema 与类型校验 + 写入边界契约
++        records = [registry.normalize_record(rec) for rec in records]
+         for rec in records:
+             registry.validate_record(rec)
++            if rec["workspace_id"] != workspace_id:
++                raise AsgError("E303", "记录信封与提交工作空间不一致")
+             registry.validate_kind_phase(rec["kind"])
+             self._enforce_issuer(rec, principal)
+-            self._enforce_revision_baseline(conn, workspace_id, rec)
+-            self._enforce_refs(conn, workspace_id, rec)
++            self._enforce_refs(conn, workspace_id, rec, {r.get("record_id") for r in records})
+ 
+         ws = conn.execute(
+             "SELECT * FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
+@@ -180,7 +187,37 @@ class WriteService:
+         )
+         retire_roots = []
+         for rec in assigned:
++            # Validate against heads advanced by earlier records in this transaction.
++            self._enforce_revision_baseline(conn, workspace_id, rec)
++            for parent_id in rec.get("prior_revision_ids", []):
++                parent = conn.execute("SELECT object_id,kind FROM record WHERE record_id=?",
++                                      (parent_id,)).fetchone()
++                if parent["object_id"] != rec["object_id"] or parent["kind"] != rec["kind"]:
++                    raise AsgError("E203", "父版本必须属于同一对象和记录类型")
++            if rec["kind"] == "JUSTIFICATION":
++                target = conn.execute("SELECT kind FROM record WHERE record_id=?",
++                                      (rec["payload"]["target_claim_id"],)).fetchone()
++                if target is None or target["kind"] != "CLAIM":
++                    raise AsgError("E101", "论证目标必须是 CLAIM")
++            if rec["kind"] in {"TASK_REVISION", "CONTEXT_MANIFEST"}:
++                from .dependencies import current_stamp
++                from .evidence import eligible_new_task
++                is_task = rec["kind"] == "TASK_REVISION"
++                roots = (sorted({r["target_record_id"] for r in rec.get("typed_refs", [])
++                                 if r["role"] in {"derived_from", "extracted_from", "transcribed_from",
++                                                  "uses_version", "depends_on", "selected_into"}}) if is_task else
++                         [item["record_id"] for item in rec["payload"]["selected_items"]])
++                rec["payload"]["_validation"] = {
++                    "stamp": current_stamp(conn, workspace_id, roots),
++                    "roots": roots,
++                    "status": ("ACTIVE" if eligible_new_task(conn, workspace_id, roots, seq)
++                               else "PENDING_REEVALUATION")
++                              if is_task else "SNAPSHOT",
++                }
+             payload_json = json.dumps(rec["payload"], ensure_ascii=False, sort_keys=True)
++            asserted_source = rec.get("asserted_source")
++            if asserted_source is None and rec.get("authenticated_writer") != principal:
++                asserted_source = rec.get("authenticated_writer")
+             conn.execute(
+                 "INSERT INTO record (record_id, object_id, workspace_id, branch_id, kind,"
+                 " schema_version, authenticated_writer, asserted_source, recorded_at,"
+@@ -188,7 +225,7 @@ class WriteService:
+                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (rec["record_id"], rec["object_id"], workspace_id, branch_id, rec["kind"],
+                  rec["schema_version"], json.dumps(principal),
+-                 json.dumps(rec["asserted_source"]) if rec.get("asserted_source") else None,
++                 json.dumps(asserted_source) if asserted_source is not None else None,
+                  recorded_at, digest_obj(rec["payload"]), payload_json,
+                  rec["policy_domain"], commit_id, seq),
+             )
+@@ -216,6 +253,12 @@ class WriteService:
+                      len(payload_json_c), "inline:" + rec["record_id"]),
+                 )
+             for ref in rec.get("typed_refs", []):
++                if ref["role"] in {"derived_from", "extracted_from", "transcribed_from"}:
++                    if conn.execute(
++                        "SELECT 1 FROM tombstone WHERE workspace_id=? AND record_id=? AND mode='purge'",
++                        (workspace_id, ref["target_record_id"]),
++                    ).fetchone():
++                        raise AsgError("E802", "禁止从已删除的记录创建新的派生副本")
+                 dst = conn.execute(
+                     "SELECT object_id FROM record WHERE record_id=?", (ref["target_record_id"],)
+                 ).fetchone()
+@@ -230,11 +273,12 @@ class WriteService:
+             if rec["kind"] == "TASK_REVISION":
+                 conn.execute(
+                     "INSERT INTO task_state (workspace_id, task_object_id, status, current_revision)"
+-                    " VALUES (?,?, 'ACTIVE', ?)"
++                    " VALUES (?,?, ?, ?)"
+                     " ON CONFLICT(workspace_id, task_object_id) DO UPDATE SET"
+                     " current_revision=excluded.current_revision,"
+-                    " status=CASE WHEN task_state.status='DRAFT' THEN 'ACTIVE' ELSE task_state.status END",
+-                    (workspace_id, rec["payload"]["task_object_id"], rec["record_id"]),
++                    " status=excluded.status, reevaluation_reason=NULL",
++                    (workspace_id, rec["payload"]["task_object_id"],
++                     rec["payload"]["_validation"]["status"], rec["record_id"]),
+                 )
+             if rec["kind"] == "RETIRE_PURGE_MARK":
+                 # 失效根是被撤回/更正的目标记录，不是标记本身（4.2 节 invalidation_queue）
+@@ -277,21 +321,23 @@ class WriteService:
+         """supersedes 必须指向该对象当前头；全局 expected_head 不能替代对象级基线（I4）。"""
+         supersedes = [r["target_record_id"] for r in rec.get("typed_refs", [])
+                       if r.get("role") == "supersedes"]
+-        if not supersedes:
+-            return
+         head = conn.execute(
+             "SELECT head_record_id FROM object_heads WHERE workspace_id=? AND object_id=?",
+             (workspace_id, rec["object_id"]),
+         ).fetchone()
+-        if head is None or head["head_record_id"] not in supersedes:
++        if head is None and not supersedes:
++            return
++        if head is None or supersedes != [head["head_record_id"]]:
+             raise AsgError("E203", "修订基线与当前头不一致（supersedes 须指向对象当前版本）",
+                            details={"expected": supersedes,
+                                     "current": head["head_record_id"] if head else None})
+ 
+-    def _enforce_refs(self, conn, workspace_id: str, rec: dict) -> None:
++    def _enforce_refs(self, conn, workspace_id: str, rec: dict, batch_ids=()) -> None:
+         """引用与父版本校验：父版本（prior_revision_ids）必须已存在（E301）；
+         一切引用不得跨工作空间（E303）。typed_refs 的存在性与批内拓扑由后续步骤校验。"""
+         for tid in rec.get("prior_revision_ids", []):
++            if tid in batch_ids:
++                continue  # Full ordered existence check follows ID assignment.
+             row = conn.execute(
+                 "SELECT workspace_id FROM record WHERE record_id=?", (tid,)
+             ).fetchone()
+diff --git a/asg_kernel/eval/systems.py b/asg_kernel/eval/systems.py
+index 291d736..4d448e5 100644
+--- a/asg_kernel/eval/systems.py
++++ b/asg_kernel/eval/systems.py
+@@ -1,11 +1,9 @@
+ """阶段 D 第一层的两个被测系统（说明书 13.1 节：确定性记录 + 假工具）。
+ 
+ - AsgSystem：包装 asg 内核。
+-- BaselineSystem：消息列表 + 事实就地覆盖 + 操作名称级授权 + 盲目重试的 outbox
+-  + 软删除。这是说明书第 3 章候选表里“消息数组加摘要”与“成熟工作流加
+-  SQL 版本和 outbox”的最小组合，故意保留这些方案被 ASG 针对的缺陷：
+-  新消息覆盖旧事实、授权不绑定内容、未知结果直接重发、删除可被旧副本复活、
+-  预算先读后写。
++- BaselineSystem：显式关闭依赖、内容绑定、对账、删除域和原子额度检查的朴素对照。
++  它用于检查场景是否能检出这些缺失机制，不代表成熟工作流、SQL 或 outbox。
++  当前结果不能用于推断 ASG 相对这些系统的收益。
+ """
+ from __future__ import annotations
+ 
+@@ -70,6 +68,7 @@ class AsgSystem:
+         self.ledger.ensure_budget(BUDGET_KEY, 100)
+         self._grants: dict[str, str] = {}
+         self._intent: str | None = None
++        self.last_error: str | None = None
+ 
+     def _head(self) -> int:
+         row = self.conn.execute(
+@@ -122,18 +121,25 @@ class AsgSystem:
+         return g["grant_id"]
+ 
+     def act(self, grant_id: str, content: str, preconditions: list[str]) -> bool:
++        self.last_error = None
+         payload = self._payload(content, preconditions)
+         try:
+             res = self.gw.prepare_effect(WS, payload, self._head(), "req-" + uuid7(),
+                                          grant_id, [{"resource_key": BUDGET_KEY, "amount": 10}])
+-        except AsgError:
++        except AsgError as error:
++            if error.code not in {"E401", "E402", "E403", "E501"}:
++                raise
++            self.last_error = error.code
+             return False
+         self._intent = res["intent_id"]
+         try:
+-            self.gw.run_once(self._intent, self.remote)
+-        except AsgError:
++            result = self.gw.run_once(self._intent, self.remote)
++        except AsgError as error:
++            if error.code not in {"E401", "E402", "E403"}:
++                raise
++            self.last_error = error.code
+             return False
+-        return True
++        return result is not None and result["state"] == "CONFIRMED_SUCCEEDED"
+ 
+     def start_and_crash(self, grant_id: str, content: str) -> None:
+         """外部调用已成功，但回执持久化前崩溃（租约过期）。"""
+@@ -188,7 +194,9 @@ class AsgSystem:
+             self.ledger.reserve(WS, "intent-" + uuid7(),
+                                 [{"resource_key": BUDGET_KEY, "amount": amount}])
+             return True
+-        except AsgError:
++        except AsgError as error:
++            if error.code != "E501":
++                raise
+             return False
+ 
+     def replay_consistent(self) -> bool:
+@@ -208,6 +216,7 @@ class BaselineSystem:
+         self.facts: dict[str, str] = {}          # claim -> SUPPORTED / OVERWRITTEN
+         self.grants: dict[str, str] = {}         # grant -> 操作名（不绑定内容）
+         self.pending = False
++        self.pending_arguments: dict = {}
+         self.limit = 100.0
+         self.used = 0.0
+         self._snap: float | None = None
+@@ -239,15 +248,19 @@ class BaselineSystem:
+         return gid
+ 
+     def act(self, grant_id: str, content: str, preconditions: list[str]) -> bool:
+-        return grant_id in self.grants           # 不核对内容，不检查前提
++        if grant_id not in self.grants:
++            return False
++        self.remote.call("compute.job.submit", {"config": content}, None)
++        return True                             # 不核对内容，不检查前提
+ 
+     def start_and_crash(self, grant_id: str, content: str) -> None:
+         self.remote.call("compute.job.submit", {"config": content}, None)
++        self.pending_arguments = {"config": content}
+         self.pending = True                      # 没有结果记录，只知道“还没确认”
+ 
+     def recover(self) -> str:
+         if self.pending:                         # 盲目重发
+-            self.remote.call("compute.job.submit", {}, None)
++            self.remote.call("compute.job.submit", self.pending_arguments, None)
+             self.pending = False
+         return "RETRIED"
+ 
+diff --git a/asg_kernel/tests/test_baseline_comparison.py b/asg_kernel/tests/test_baseline_comparison.py
+index 17a5d24..08d5f5c 100644
+--- a/asg_kernel/tests/test_baseline_comparison.py
++++ b/asg_kernel/tests/test_baseline_comparison.py
+@@ -1,9 +1,7 @@
+ """阶段 D 第一层：ASG 与简单基线在同一批故障场景上的对比。
+ 
+-场景取自说明书第 13.3 节的对抗清单。每个场景对两个系统施加相同操作序列，
+-断言 ASG 满足契约；基线按“消息列表 + 就地覆盖 + 名称级授权 + 盲目重试”
+-的固有行为失败。基线的失败是预期结果，用来说明结构带来的差异，
+-不是待修复缺陷。
++场景取自说明书第 13.3 节的对抗清单。朴素对照显式缺少待测机制，
++失败只能证明场景能检出这些机制缺失，不是成熟工作流的收益比较。
+ """
+ from __future__ import annotations
+ 
+@@ -29,6 +27,9 @@ class TestStaleEvidenceBlocksAction(unittest.TestCase):
+                 system.withdraw(obs)
+                 executed = system.act(grant, "config-v1", [claim])
+                 self.assertEqual(executed, not expect_blocked)
++                self.assertEqual(system.remote.calls, 0 if expect_blocked else 1)
++                if expect_blocked:
++                    self.assertEqual(system.last_error, "E401")
+                 system.close()
+ 
+ 
+@@ -57,6 +58,9 @@ class TestGrantBindsContent(unittest.TestCase):
+                 grant = system.grant("config-v7")
+                 executed = system.act(grant, "config-v8", [])
+                 self.assertEqual(executed, expect_allowed)
++                self.assertEqual(system.remote.calls, 1 if expect_allowed else 0)
++                if not expect_allowed:
++                    self.assertEqual(system.last_error, "E402")
+                 system.close()
+ 
+ 
+@@ -118,5 +122,17 @@ class TestReplay(unittest.TestCase):
+                 system.close()
+ 
+ 
++class TestHealthyControl(unittest.TestCase):
++    def test_valid_action_reaches_remote_in_both_systems(self):
++        for system in systems():
++            try:
++                obs = system.observe("https://healthy/source")
++                claim = system.claim("valid fact", [obs])
++                self.assertTrue(system.act(system.grant("config-v1"), "config-v1", [claim]))
++                self.assertEqual(system.remote.calls, 1)
++            finally:
++                system.close()
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/asg_kernel/tests/test_contract_regression.py b/asg_kernel/tests/test_contract_regression.py
+index 4497cd1..7125eb9 100644
+--- a/asg_kernel/tests/test_contract_regression.py
++++ b/asg_kernel/tests/test_contract_regression.py
+@@ -86,6 +86,7 @@ class TestForgedReceiptRejected(unittest.TestCase):
+ 
+     def test_forged_receipt_does_not_settle(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         r = prepare(conn, auth, gw, intent_payload())
+         claim_row = gw.claim(r["intent_id"])
+         ctx = gw.begin_attempt(WS, r["intent_id"], claim_row["token"])
+@@ -121,6 +122,7 @@ class TestMultilevelEvidenceChain(unittest.TestCase):
+ 
+     def test_chain_invalidation_blocks_action(self):
+         conn, svc, _, auth, gw = stack()
++        self.addCleanup(conn.close)
+         o = observe(svc, url="https://src.example/only")
+         c1 = claim(svc)
+         justify(svc, WS, c1, [[o]], expected_head=head(conn))
+@@ -142,6 +144,7 @@ class TestMultilevelEvidenceChain(unittest.TestCase):
+ 
+     def test_rule_assumption_and_justification_retirement(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         # 规则只约束自己的论证：撤回规则不影响另一条独立论证
+         o1, o2 = observe(svc, "https://a.example/1"), observe(svc, "https://b.example/2")
+         rule = observe(svc, "https://rules.example/r1")
+@@ -178,6 +181,7 @@ class TestUnknownDoesNotRedispatch(unittest.TestCase):
+ 
+     def test_query_only_unknown_reconciles_instead_of_redispatch(self):
+         conn, svc, _, auth, gw = stack()
++        self.addCleanup(conn.close)
+ 
+         class QueryOnly(Connector):
+             def __init__(self):
+@@ -215,6 +219,7 @@ class TestGrantRevocationSeparated(unittest.TestCase):
+ 
+     def test_revoke_after_prepare_blocks_dispatch(self):
+         conn, svc, _, auth, gw = stack()
++        self.addCleanup(conn.close)
+         p = intent_payload()
+         h = head(conn)
+         g = auth.issue_grant(WS, APPROVER, AGENT, compute_operation_digest(p),
+@@ -234,6 +239,7 @@ class TestConfirmedNotOverwritten(unittest.TestCase):
+ 
+     def test_late_query_error_keeps_success(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+ 
+         class Keyed(Connector):
+             def __init__(self):
+@@ -267,6 +273,7 @@ class TestReplayConsistency(unittest.TestCase):
+ 
+     def test_pending_reevaluation_replays(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         o = observe(svc, "https://plan.example/input")
+         task_obj = "task-" + uuid7()
+         svc.submit_proposal(WS, [{
+@@ -289,6 +296,7 @@ class TestManifestBinding(unittest.TestCase):
+ 
+     def test_selected_candidate_invalidates_manifest(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         c_req = claim(svc)
+         o_cand = observe(svc, "https://cand.example/x")
+         out = project_context(conn, svc, WS, required_ids=[c_req],
+@@ -301,6 +309,7 @@ class TestManifestBinding(unittest.TestCase):
+ 
+     def test_missing_required_is_explicit_failure(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         o = observe(svc, "https://must.example/y")
+         Purger(conn, svc).retire_or_purge(WS, [o], head(conn), "req-" + uuid7(),
+                                           AGENT, mode="purge")
+@@ -315,6 +324,7 @@ class TestDerivedIsolation(unittest.TestCase):
+ 
+     def test_derived_copy_isolated_and_reimport_blocked(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         src = observe(svc, "https://secret.example/page")
+         copy = svc.observe(WS, {
+             "source": {"connector_identity": "web.fetch@v2",
+@@ -352,6 +362,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_stale_object_baseline_rejected(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         task_obj = "task-" + uuid7()
+         base = {"task_object_id": task_obj, "goal": "v1", "acceptance_refs": ["a"]}
+ 
+@@ -375,6 +386,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_prior_revision_must_exist(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         with self.assertRaises(AsgError) as cm:
+             svc.submit_proposal(WS, [{
+                 "workspace_id": WS, "object_id": "o1", "kind": "CLAIM", "schema_version": 1,
+@@ -386,6 +398,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_cross_workspace_ref_rejected(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         other = observe(svc)
+         # 把观察改记为另一工作空间（直接构造第二个工作空间的记录）
+         svc.submit_proposal("ws-other", [{
+@@ -409,6 +422,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_digest_computed_by_service_and_branch_rejected(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         rid = "req-fixed"
+         svc.observe(WS, {"source": {"connector_identity": "x", "url_or_handle": "u1",
+                                     "content_version": "1"},
+diff --git a/asg_kernel/tests/test_fault_interleaving.py b/asg_kernel/tests/test_fault_interleaving.py
+index 8f01a79..8379817 100644
+--- a/asg_kernel/tests/test_fault_interleaving.py
++++ b/asg_kernel/tests/test_fault_interleaving.py
+@@ -114,6 +114,7 @@ class TestLeaseExpiryLateReceipt(unittest.TestCase):
+ 
+     def test_late_receipt_after_reconcile_keeps_terminal_state(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = KeyedRemote()
+         p = intent()
+         r = prepare(conn, auth, gw, p)
+@@ -148,6 +149,7 @@ class TestQueryBecomesVisible(unittest.TestCase):
+ 
+     def test_unknown_resolves_when_query_becomes_final(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = QueryOnlyRemote(invisible_rounds=2)
+         p = intent(mode="QUERY_ONLY")
+         r = prepare(conn, auth, gw, p)
+@@ -179,6 +181,7 @@ class TestHistoricalReadAfterPurge(unittest.TestCase):
+ 
+     def test_replay_before_purge_does_not_revive(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         obs = svc.observe(WS, {
+             "source": {"connector_identity": "web.fetch@v2",
+                        "url_or_handle": "https://secret.example/old",
+@@ -232,6 +235,7 @@ class TestReconcileConflict(unittest.TestCase):
+ 
+     def test_contradictory_query_keeps_success_and_flags_conflict(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = ConflictingRemote(query_outcome="CONFIRMED_NOT_APPLIED")
+         p = intent()
+         r = prepare(conn, auth, gw, p)
+@@ -262,6 +266,7 @@ class TestNotAppliedThenLateSuccess(unittest.TestCase):
+ 
+     def test_late_success_after_not_applied_is_conflict(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = ConflictingRemote(query_outcome="CONFIRMED_NOT_APPLIED")
+         p = intent()
+         r = prepare(conn, auth, gw, p)
+@@ -271,8 +276,11 @@ class TestNotAppliedThenLateSuccess(unittest.TestCase):
+         ctx = gw.begin_attempt(WS, r["intent_id"], cl["token"])
+         conn.execute("UPDATE effect_outbox SET claim_expires_at='2000-01-01T00:00:00Z'"
+                      " WHERE intent_id=?", (r["intent_id"],))
+-        out = gw.run_once(r["intent_id"], remote)
+-        self.assertEqual(out["state"], "CONFIRMED_NOT_APPLIED")
++        # Deliberate contradictory trusted receipts test, NOT evidence that a
++        # mere negative key query closes future sends (round-seven contract).
++        state = gw.record_response(WS, ctx["attempt_id"],
++                                   {"outcome": "CONFIRMED_NOT_APPLIED", "clause": "injected final rejection"})
++        self.assertEqual(state, "CONFIRMED_NOT_APPLIED")
+         self.assertEqual(ledger.balance("ws:compute.gpu")["reserved"], 0)
+ 
+         # 迟到的成功回执到达：确定性证据互相矛盾，保留冲突并不结算成功
+diff --git a/asg_kernel/tests/test_phase_a.py b/asg_kernel/tests/test_phase_a.py
+index 48a1b9a..14e1626 100644
+--- a/asg_kernel/tests/test_phase_a.py
++++ b/asg_kernel/tests/test_phase_a.py
+@@ -57,6 +57,7 @@ def submit_observation(svc, head, url="https://example.org/spec"):
+ class TestHappyPath(unittest.TestCase):
+     def test_observe_claim_task_invalidate(self):
+         conn, svc, _, proj = make_service()
++        self.addCleanup(conn.close)
+         r1 = submit_observation(svc, 0)
+         self.assertEqual(r1["sequence"], 1)
+         self.assertEqual(r1["snapshot"]["head_sequence"], 1)
+@@ -89,6 +90,7 @@ class TestINV01Immutable(unittest.TestCase):
+ 
+     def test_direct_mutation_rejected(self):
+         conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         r = submit_observation(svc, 0)
+         rid = r["record_ids"][0]
+         with self.assertRaises(sqlite3.DatabaseError) as cm:
+@@ -105,7 +107,8 @@ class TestINV02FutureRef(unittest.TestCase):
+     """TC-INV-02：不引用未来记录（I2）；不存在引用（E301）。"""
+ 
+     def test_batch_future_ref_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         id_a, id_b = str(uuid.uuid4()), str(uuid.uuid4())
+         rec_a = {
+             "workspace_id": WS, "record_id": id_a, "object_id": "obj-a", "kind": "CLAIM",
+@@ -124,7 +127,8 @@ class TestINV02FutureRef(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E302")
+ 
+     def test_nonexistent_ref_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         rec = {
+             "workspace_id": WS, "object_id": "obj-c", "kind": "CLAIM",
+             "schema_version": 1, "authenticated_writer": PRINCIPAL, "policy_domain": "default",
+@@ -138,6 +142,7 @@ class TestINV02FutureRef(unittest.TestCase):
+ 
+     def test_batch_prior_ref_accepted(self):
+         conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         id_b = str(uuid.uuid4())
+         rec_b = {
+             "workspace_id": WS, "record_id": id_b, "object_id": "obj-b", "kind": "OBSERVATION",
+@@ -161,7 +166,8 @@ class TestINV03RequestIdReuse(unittest.TestCase):
+     """TC-INV-03：同一 request_id 不接受不同内容（I3）；同内容幂等重放。"""
+ 
+     def test_reuse_with_different_content(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         rid = "req-fixed-1"
+         svc.observe(WS, obs_payload("https://a.example/1"), 0, rid, PRINCIPAL)
+         with self.assertRaises(AsgError) as cm:
+@@ -169,7 +175,8 @@ class TestINV03RequestIdReuse(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E202")
+ 
+     def test_identical_replay_returns_original(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         rid = "req-fixed-2"
+         payload = obs_payload("https://a.example/3")
+         obj = "obs-" + uuid7()  # 幂等重放要求请求内容完全一致：同一 object_id
+@@ -184,7 +191,8 @@ class TestINV04ConcurrentRevise(unittest.TestCase):
+     """TC-INV-04：并发 revise 竞争——expected_head 冲突（E201）与基线不匹配（E203）。"""
+ 
+     def test_stale_expected_head_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         submit_observation(svc, 0)                     # seq 1
+         submit_observation(svc, 1, url="https://b.example/1")  # seq 2
+         with self.assertRaises(AsgError) as cm:        # 携带过期 head=0
+@@ -193,7 +201,8 @@ class TestINV04ConcurrentRevise(unittest.TestCase):
+         self.assertEqual(cm.exception.details["current_head"], 2)
+ 
+     def test_task_baseline_mismatch_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         tp1 = task_payload()
+         r1 = svc.submit_proposal(WS, [{
+             "workspace_id": WS, "object_id": tp1["task_object_id"], "kind": "TASK_REVISION",
+@@ -218,7 +227,8 @@ class TestINV05ReplayDeterminism(unittest.TestCase):
+     """TC-INV-05：回放重建投影与在线投影逐字段一致（I9 的确定性基础）。"""
+ 
+     def test_replay_matches_live(self):
+-        _, svc, _, proj = make_service()
++        conn, svc, _, proj = make_service()
++        self.addCleanup(conn.close)
+         r1 = submit_observation(svc, 0)
+         claim_obj = "claim-" + uuid7()
+         svc.claim(WS, claim_payload(), 1, "req-" + uuid7(), PRINCIPAL, object_id=claim_obj,
+@@ -247,7 +257,8 @@ class TestTC03Budget(unittest.TestCase):
+     """TC-03：预算 100，两个 Agent 各预留 60——第二笔拒绝且失败可解释（I5）。"""
+ 
+     def test_double_reserve_rejected_with_details(self):
+-        _, _, ledger, _ = make_service()
++        conn, _, ledger, _ = make_service()
++        self.addCleanup(conn.close)
+         ledger.ensure_budget("ws:compute.gpu", 100)
+         r1 = ledger.reserve(WS, "intent-a", [{"resource_key": "ws:compute.gpu", "amount": 60}])
+         self.assertEqual(len(r1), 1)
+@@ -270,7 +281,8 @@ class TestTC03Budget(unittest.TestCase):
+ 
+     def test_unknown_retains_reservation(self):
+         """UNKNOWN 保留占用（6.3 节）：uncertain 期间余量不回升。"""
+-        _, _, ledger, _ = make_service()
++        conn, _, ledger, _ = make_service()
++        self.addCleanup(conn.close)
+         ledger.ensure_budget("ws:compute.gpu", 100)
+         r1 = ledger.reserve(WS, "intent-a", [{"resource_key": "ws:compute.gpu", "amount": 60}])
+         self.assertEqual(ledger.settle(r1[0], "UNKNOWN"), "uncertain")
+diff --git a/asg_kernel/tests/test_phase_b.py b/asg_kernel/tests/test_phase_b.py
+index 5c8e41e..6b95abf 100644
+--- a/asg_kernel/tests/test_phase_b.py
++++ b/asg_kernel/tests/test_phase_b.py
+@@ -27,8 +27,10 @@ class FakeKeyedRemote(Connector):
+ 
+     def __init__(self, final_query_guarantee=True):
+         super().__init__(ConnectorContract(mode="KEYED", supports_job_query=True,
+-                                           final_query_guarantee=final_query_guarantee))
++                                           final_query_guarantee=final_query_guarantee,
++                                           supports_attempt_closure=final_query_guarantee))
+         self.key_store: dict[str, dict] = {}
++        self.closed = set()
+         self.call_count = 0
+ 
+     def call(self, operation, arguments, idempotency_key):
+@@ -44,6 +46,19 @@ class FakeKeyedRemote(Connector):
+     def query_by_key(self, key):
+         return self.key_store.get(key)
+ 
++    def call_attempt(self, context):
++        aid = context["attempt_id"]
++        if (context["idempotency_key"], aid) in self.closed:
++            self.call_count += 1
++            return {"outcome": "CONFIRMED_NOT_APPLIED", "closed_attempt_id": aid}
++        return super().call_attempt(context)
++
++    def close_attempt(self, key, attempt_id):
++        if key in self.key_store:
++            return self.key_store[key]
++        self.closed.add((key, attempt_id))
++        return {"outcome": "CONFIRMED_NOT_APPLIED", "closed_attempt_id": attempt_id}
++
+ 
+ class FakeNoContractRemote(Connector):
+     def __init__(self):
+@@ -121,6 +136,7 @@ def make_due(conn, intent_id):
+ class TestHappyPathDispatch(unittest.TestCase):
+     def test_prepare_dispatch_settle(self):
+         conn, svc, ledger, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote()
+         r = prepare(gw, 0)
+         out = gw.run_once(r["intent_id"], remote)
+@@ -148,7 +164,8 @@ class TestTC04GrantBinding(unittest.TestCase):
+     """TC-04 / I6：审批后改参数、接收者或产物——新动作不能借用旧授权。"""
+ 
+     def test_modified_arguments_rejected(self):
+-        _, svc, _, auth, gw = make_stack()
++        conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         v7 = intent_payload()
+         grant = issue_grant_for(auth, v7, head=0)
+         prepare(gw, 1, payload=v7, grant=grant["grant_id"])  # v7 获批并准备成功
+@@ -159,7 +176,8 @@ class TestTC04GrantBinding(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E402")
+ 
+     def test_target_out_of_scope_rejected(self):
+-        _, svc, _, auth, gw = make_stack()
++        conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload(target_ids=["cluster-b/other-queue"])
+         # 摘要与参数一致，但授权的目标范围只批准了 DEST：范围检查拒绝（E402）
+         grant = auth.issue_grant(
+@@ -170,7 +188,8 @@ class TestTC04GrantBinding(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E402")
+ 
+     def test_expired_and_revoked_and_exhausted(self):
+-        _, svc, _, auth, gw = make_stack()
++        conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload()
+         # 过期授权在 prepare 即被拒
+         expired = auth.issue_grant(WS, APPROVER, AGENT,
+@@ -206,6 +225,7 @@ class TestTC05CrashBeforeReceipt(unittest.TestCase):
+ 
+     def test_reconcile_by_key_confirms_success(self):
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote()
+         r = prepare(gw, 0)
+         claim = gw.claim(r["intent_id"])
+@@ -226,6 +246,7 @@ class TestTC05CrashBeforeReceipt(unittest.TestCase):
+     def test_non_final_query_keeps_unknown(self):
+         """查询不满足最终性：查无不能作为未生效依据，维持 UNKNOWN 并保留占用。"""
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote(final_query_guarantee=False)
+         remote.query_by_key = lambda key: None  # 模拟最终一致索引暂不可见
+         r = prepare(gw, 0)
+@@ -246,13 +267,14 @@ class TestTC06LeaseExpiry(unittest.TestCase):
+     def test_keyed_dedup_no_duplicate_effect(self):
+         """崩溃在开始记录之后、真正发出之前：对账判未生效后按同键安全重试。"""
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote()
+         r = prepare(gw, 0)
+         claim = gw.claim(r["intent_id"])
+         gw.begin_attempt(WS, r["intent_id"], claim["token"])  # ATTEMPT 已记录，未外呼
+         expire_lease(conn, r["intent_id"])                    # 旧 worker 失联
+         out = gw.run_once(r["intent_id"], remote)
+-        # 对账（final 保证）判未生效 -> 同键重试一次 -> 成功；远端只收到一次调用
++        # 远端关闭旧 Attempt -> 同键新 Attempt 重试成功；远端只收到一次调用
+         self.assertEqual(out["state"], "CONFIRMED_SUCCEEDED")
+         self.assertEqual(remote.call_count, 1)
+         attempts = conn.execute("SELECT COUNT(*) c FROM attempt WHERE intent_id=?",
+@@ -262,6 +284,7 @@ class TestTC06LeaseExpiry(unittest.TestCase):
+     def test_no_contract_refuses_redispatch(self):
+         """无幂等契约：默认暂停自动重发（E604），保留 UNKNOWN 边界。"""
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload(idempotency_contract={
+             "mode": "NONE", "retry_policy": {"max": 3}})
+         r = prepare(gw, 0, payload=p)
+@@ -287,6 +310,7 @@ class TestPreconditionGate(unittest.TestCase):
+ 
+     def test_stale_precondition_blocks_prepare_and_dispatch(self):
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         head = 0
+         obs = svc.observe(WS, {
+             "source": {"connector_identity": "web.fetch@v2",
+@@ -330,6 +354,7 @@ class TestBudgetGrantIntegration(unittest.TestCase):
+ 
+     def test_budget_shortage_rolls_back_everything(self):
+         conn, svc, ledger, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload()
+         grant = issue_grant_for(auth, p, head=0)
+         other = Ledger(conn)
+diff --git a/asg_kernel/tests/test_phase_c.py b/asg_kernel/tests/test_phase_c.py
+index 46cd566..432d3e1 100644
+--- a/asg_kernel/tests/test_phase_c.py
++++ b/asg_kernel/tests/test_phase_c.py
+@@ -73,6 +73,7 @@ class TestTC01InvalidationPrecision(unittest.TestCase):
+ 
+     def test_partial_withdraw_keeps_independent_support(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://a.example/1")
+         o2 = observe(svc, url="https://a.example/2")
+         o3 = observe(svc, url="https://b.example/3")
+@@ -106,6 +107,7 @@ class TestTC02ContestedNotOverwritten(unittest.TestCase):
+ 
+     def test_contested_state_surfaces(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://old.example/spec")
+         c2 = make_claim(svc)
+         justify(svc, WS, c2, [[o1]], expected_head=head_of(conn))
+@@ -130,6 +132,7 @@ class TestTC08LineageNotIndependent(unittest.TestCase):
+ 
+     def test_copies_share_root(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         root = observe(svc, url="https://origin.example/post")
+         c1 = observe(svc, url="https://mirror1.example/x",
+                      refs=[{"role": "extracted_from", "target_record_id": root}])
+@@ -140,8 +143,8 @@ class TestTC08LineageNotIndependent(unittest.TestCase):
+ 
+         ev = evaluate_support(conn, WS, c3)
+         self.assertEqual(ev["four_state"], "SUPPORTED")
+-        self.assertEqual(ev["independent_root_count"], 1)   # 三条路径同一根来源
+-        self.assertEqual(ev["independent_roots"], [root])
++        self.assertEqual(ev["lineage_rooted_support_item_count"], 1)   # 显式谱系去重
++        self.assertEqual(ev["lineage_rooted_support_items"], [root])
+ 
+         # 根来源撤回：转载链随之失效（DERIVATION 传播），不残留“独立”支持
+         svc.invalidate(WS, root, "withdrawn", head_of(conn), "req-" + uuid7(), AGENT)
+@@ -155,6 +158,7 @@ class TestPropagationTaskReeval(unittest.TestCase):
+ 
+     def test_task_moves_to_pending_reevaluation(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://a.example/plan-input")
+         task_obj = "task-" + uuid7()
+         tp = {"task_object_id": task_obj, "goal": "整理数据说明",
+@@ -195,6 +199,7 @@ class TestTC10StaleGate(unittest.TestCase):
+ 
+     def test_unrelated_pending_invalidation_blocks_dispatch(self):
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         o_pre = observe(svc, url="https://a.example/pre")
+         o_other = observe(svc, url="https://b.example/other")
+         iid = self._prepare_intent(conn, auth, gw, [o_pre])
+@@ -214,6 +219,7 @@ class TestTC10StaleGate(unittest.TestCase):
+ 
+     def test_exploratory_read_returns_stale_annotation(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://a.example/x")
+         o2 = observe(svc, url="https://b.example/y")
+         svc.invalidate(WS, o2, "corrected", head_of(conn), "req-" + uuid7(), AGENT)
+@@ -226,6 +232,7 @@ class TestTC09ContextBudget(unittest.TestCase):
+ 
+     def test_required_over_budget_rejected(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         c_a = make_claim(svc, data_labels=["internal"])
+         with self.assertRaises(AsgError) as cm:
+             project_context(conn, svc, WS, required_ids=[c_a], candidate_ids=[],
+@@ -236,6 +243,7 @@ class TestTC09ContextBudget(unittest.TestCase):
+ 
+     def test_manifest_persisted_with_labels_and_omissions(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         c_req = make_claim(svc, data_labels=["internal"])
+         c_big = make_claim(svc, data_labels=["sensitive:pii"],
+                            constrained_text="超长候选" * 200)
+@@ -265,6 +273,7 @@ class TestTC07PurgeRevival(unittest.TestCase):
+ 
+     def test_purge_blocks_read_and_revival(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://secret.example/page")
+         c1 = make_claim(svc)
+         justify(svc, WS, c1, [[o1]], expected_head=head_of(conn))
+diff --git a/asg_kernel/tests/test_state_machine_combinations.py b/asg_kernel/tests/test_state_machine_combinations.py
+index cdf6c38..374e076 100644
+--- a/asg_kernel/tests/test_state_machine_combinations.py
++++ b/asg_kernel/tests/test_state_machine_combinations.py
+@@ -1,4 +1,4 @@
+-"""状态机组合测试 —— 随机轨迹下的不变量（阶段 D 准入前的最后一层）。
++"""状态机组合测试 —— 随机轨迹下的不变量（有限执行模型）。
+ 
+ 用固定种子生成 Attempt 回执序列、租约过期与迟到回执的交错，
+ 每一步之后检查全局不变量。失败时输出种子与事件序列，可复现。
+@@ -8,7 +8,7 @@ S1 账本恒等：reserved = Σ(reserved+uncertain)，committed = Σ(committed)
+    且 reserved、committed 非负、两者之和不超过额度。
+ S2 committed 单调不减。
+ S3 CONFIRMED_SUCCEEDED 一旦到达不再离开。
+-S4 离开 CONFIRMED_NOT_APPLIED 只能走向带冲突标记的状态。
++S4 无新增 Attempt 时，离开 CONFIRMED_NOT_APPLIED 必须有冲突标记；正常重试须有新 Attempt。
+ S5 确认成功后不再产生新的外部调用。
+ S6 授权占用次数不超过 use_limit。
+ """
+@@ -16,6 +16,7 @@ from __future__ import annotations
+ 
+ import random
+ import unittest
++from unittest.mock import patch
+ 
+ from asg import (AsgError, Authorizer, Gateway, Ledger, WriteService,
+                  compute_operation_digest, connect, init_schema)
+@@ -81,7 +82,7 @@ def check_invariants(conn, ledger, state_history, calls_at_success, remote) -> l
+         bad.append(f"S1 额度越界 {bal}")
+     if len(state_history) >= 2 and bal["committed"] + 1e-6 < state_history[-2][1]:
+         bad.append("S2 committed 下降")
+-    states = [s for s, _ in state_history]
++    states = [entry[0] for entry in state_history]
+     if "CONFIRMED_SUCCEEDED" in states:
+         first = states.index("CONFIRMED_SUCCEEDED")
+         if any(s != "CONFIRMED_SUCCEEDED" for s in states[first:]):
+@@ -91,7 +92,8 @@ def check_invariants(conn, ledger, state_history, calls_at_success, remote) -> l
+     if len(states) >= 2 and states[-2] == "CONFIRMED_NOT_APPLIED" \
+             and states[-1] != "CONFIRMED_NOT_APPLIED":
+         reason = conn.execute("SELECT unresolved_reason FROM effect_state").fetchone()
+-        if not reason or "conflict" not in (reason["unresolved_reason"] or ""):
++        new_attempt = state_history[-1][2] > state_history[-2][2]
++        if not new_attempt and (not reason or "conflict" not in (reason["unresolved_reason"] or "")):
+             bad.append(f"S4 未生效态无冲突标记地离开 -> {states[-1]}")
+     g = conn.execute("SELECT uses_consumed, use_limit FROM grant_record").fetchone()
+     if g and g["uses_consumed"] > g["use_limit"]:
+@@ -99,9 +101,16 @@ def check_invariants(conn, ledger, state_history, calls_at_success, remote) -> l
+     return bad
+ 
+ 
+-def run_trajectory(seed: int, steps: int = 12) -> list[str]:
++def run_trajectory(seed: int, steps: int = 12, coverage: dict | None = None) -> list[str]:
+     rng = random.Random(seed)
+     conn = connect()
++    try:
++        return _run_trajectory(conn, rng, seed, steps, coverage)
++    finally:
++        conn.close()
++
++
++def _run_trajectory(conn, rng, seed, steps, coverage):
+     init_schema(conn)
+     svc = WriteService(conn)
+     ledger = Ledger(conn)
+@@ -120,23 +129,23 @@ def run_trajectory(seed: int, steps: int = 12) -> list[str]:
+         "arguments_ref": {"arguments": {"n": seed}}, "artifact_revision_ids": [],
+         "precondition_refs": [], "idempotency_contract": contract,
+     }
+-    h = conn.execute("SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?",
+-                     (WS,)).fetchone()
+     g = auth.issue_grant(WS, APPROVER, AGENT, compute_operation_digest(payload),
+                          "提交", FAR, [DEST], use_limit=rng.choice([1, 3]), expected_head=0)
+     try:
+         gw.prepare_effect(WS, payload, 1, "req-" + uuid7(), g["grant_id"],
+                           [{"resource_key": "ws:compute.gpu", "amount": AMOUNT}])
+-    except AsgError:
+-        return []
++    except AsgError as error:
++        return [f"seed={seed} prepare failed: {error.code}: {error}"]
+     iid = payload["intent_id"]
+     remote = RandomRemote(rng, mode)
+ 
+     history: list[tuple] = []
+     calls_at_success = None
+     events = ["run", "run", "expire", "due", "late"]
++    trace = []
+     for _ in range(steps):
+         event = rng.choice(events)
++        trace.append(event)
+         try:
+             if event == "expire":
+                 conn.execute("UPDATE effect_outbox SET claim_expires_at='2000-01-01T00:00:00Z'"
+@@ -154,28 +163,48 @@ def run_trajectory(seed: int, steps: int = 12) -> list[str]:
+                                         "external_job_id": remote.job, "clause": "late"})
+             else:
+                 gw.run_once(iid, remote)
+-        except AsgError:
+-            pass  # 拒绝本身是合法结果，不变量仍须成立
++        except AsgError as error:
++            # Only modelled lease/conflict/reconciliation rejections are allowed.
++            if error.code not in {"E201", "E603", "E604", "E605", "E606"}:
++                return [f"seed={seed} mode={mode} trace={trace} unexpected: {error.code}: {error}"]
++        if coverage is not None:
++            coverage["steps"] = coverage.get("steps", 0) + 1
+         eff = conn.execute("SELECT state FROM effect_state WHERE intent_id=?",
+                            (iid,)).fetchone()
+         bal = ledger.balance("ws:compute.gpu")
+-        history.append((eff["state"] if eff else None, bal["committed"]))
++        attempts = conn.execute("SELECT COUNT(*) FROM attempt WHERE intent_id=?", (iid,)).fetchone()[0]
++        history.append((eff["state"] if eff else None, bal["committed"], attempts))
+         if eff and eff["state"] == "CONFIRMED_SUCCEEDED" and calls_at_success is None:
+             calls_at_success = remote.calls
+         bad = check_invariants(conn, ledger, history, calls_at_success, remote)
+         if bad:
+-            conn.close()
+-            return [f"seed={seed} mode={mode} event={event}"] + bad
+-    conn.close()
++            return [f"seed={seed} mode={mode} trace={trace}"] + bad
++    if coverage is not None:
++        coverage["trajectories"] = coverage.get("trajectories", 0) + 1
++        coverage[mode] = coverage.get(mode, 0) + 1
++        coverage["calls"] = coverage.get("calls", 0) + remote.calls
+     return []
+ 
+ 
+ class TestRandomTrajectories(unittest.TestCase):
+     def test_invariants_over_random_trajectories(self):
+-        failures = []
++        failures, coverage = [], {}
+         for seed in range(60):
+-            failures.extend(run_trajectory(seed))
++            failures.extend(run_trajectory(seed, coverage=coverage))
+         self.assertFalse(failures, "\n".join(failures[:12]))
++        self.assertEqual(coverage["trajectories"], 60)
++        self.assertEqual(coverage["steps"], 720)
++        self.assertGreater(coverage["KEYED"], 0)
++        self.assertGreater(coverage["QUERY_ONLY"], 0)
++        self.assertGreater(coverage["calls"], 0)
++
++    def test_setup_failure_cannot_pass_vacuously(self):
++        with patch.object(Gateway, "prepare_effect", side_effect=AsgError("E101", "injected")):
++            self.assertIn("prepare failed", run_trajectory(0)[0])
++
++    def test_unexpected_event_error_is_reported(self):
++        with patch.object(Gateway, "run_once", side_effect=AsgError("E101", "injected")):
++            self.assertIn("unexpected: E101", run_trajectory(0, steps=100)[0])
+ 
+ 
+ if __name__ == "__main__":

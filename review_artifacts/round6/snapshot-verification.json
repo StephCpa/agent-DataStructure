@@ -1,0 +1,8 @@
+{
+  "archive_sha256": "69e04fa107f113d70a758b756a975b768027e29e1d10aa3cefe81425bf5d5fac",
+  "source_files_checked": 37,
+  "workspace_matches_snapshot": true,
+  "zip_crc": "pass",
+  "extracted_test_exit_code": 0,
+  "test_output": "snapshot-tests.txt"
+}

@@ -11,9 +11,11 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
+from .dependencies import closure, load_graph, current_stamp
 from .errors import AsgError
 from .storage import write_txn
 
@@ -39,7 +41,8 @@ def _head(conn, workspace_id: str) -> int:
     return row["head_sequence"] if row else 0
 
 
-def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int = 32) -> int:
+def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int = 32,
+                  metrics: dict | None = None) -> int:
     """传播工作者：逐条处理失效队列，按反向依赖闭包打标；队列清空后推进水位。"""
     processed = 0
     while processed < max_items:
@@ -49,58 +52,61 @@ def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int = 
                 " ORDER BY item_id LIMIT 1", (workspace_id,),
             ).fetchone()
             if item is None:
+                # Dependencies may have been appended after an earlier withdrawal
+                # was drained. Recompute the current graph before declaring it caught up.
+                for retired in tx.execute(
+                    "SELECT root_record_id, MAX(epoch) AS epoch FROM invalidation_queue"
+                    " WHERE workspace_id=? GROUP BY root_record_id", (workspace_id,),
+                ).fetchall():
+                    _propagate_closure(tx, workspace_id, retired["root_record_id"], retired["epoch"], metrics)
+                _refresh_tasks(tx, workspace_id, metrics=metrics)
                 _advance_watermark(tx, workspace_id)
                 break
             tx.execute("UPDATE invalidation_queue SET status='PROCESSING' WHERE item_id=?",
                        (item["item_id"],))
-            _propagate_closure(tx, workspace_id, item["root_record_id"], item["epoch"])
+            _propagate_closure(tx, workspace_id, item["root_record_id"], item["epoch"], metrics)
             tx.execute("UPDATE invalidation_queue SET status='DONE' WHERE item_id=?",
                        (item["item_id"],))
             processed += 1
     return processed
 
 
-def _propagate_closure(tx, workspace_id: str, root_record_id: str, epoch: int) -> int:
+def _propagate_closure(tx, workspace_id: str, root_record_id: str, epoch: int, metrics=None) -> int:
     """反向依赖闭包：root 自身与全部上游依赖者打标（via 为其直接依赖的下游记录）。"""
-    visited = {root_record_id}
-    frontier = [root_record_id]
-    affected = 0
-    while frontier:
-        q = ", ".join("?" * len(frontier))
-        rows = tx.execute(
-            f"SELECT src_record_id, dst_record_id, ref_role FROM record_ref"
-            f" WHERE dst_record_id IN ({q}) AND ref_layer IN {PROPAGATING_LAYERS}",
-            tuple(frontier),
-        ).fetchall()
-        next_frontier = []
-        for r in rows:
-            src = r["src_record_id"]
-            if src in visited:
-                continue
-            visited.add(src)
-            next_frontier.append(src)
-            tx.execute(
-                "INSERT OR IGNORE INTO invalidation_mark (workspace_id, record_id,"
-                " via_record_id, path_role, epoch) VALUES (?,?,?,?,?)",
-                (workspace_id, src, r["dst_record_id"], r["ref_role"], epoch),
-            )
-            affected += 1
-            kind = tx.execute("SELECT kind FROM record WHERE record_id=?", (src,)).fetchone()
-            if kind is None:
-                continue
-            if kind["kind"] == "TASK_REVISION":
-                # 任务前提命中失效：进入待重评（6.5 节）
-                tx.execute(
-                    "UPDATE task_state SET status='PENDING_REEVALUATION',"
-                    " reevaluation_reason=? WHERE workspace_id=? AND task_object_id IN"
-                    " (SELECT object_id FROM record WHERE record_id=?)"
-                    " AND status IN ('DRAFT','ACTIVE')",
-                    (f"invalidated_via:{root_record_id}", workspace_id, src),
-                )
-            # CLAIM / JUSTIFICATION / CONTEXT_MANIFEST 命中标记即可：
-            # 求值按成员资格精确重算（7.2 节），清单读取按 mark 判过期
-        frontier = next_frontier
-    return affected
+    reached = closure(load_graph(tx, workspace_id, metrics=metrics), [root_record_id])
+    if metrics is not None:
+        metrics["closure_nodes_visited"] = metrics.get("closure_nodes_visited", 0) + len(reached)
+    for src, (via, role) in reached.items():
+        tx.execute(
+            "INSERT OR IGNORE INTO invalidation_mark (workspace_id, record_id,"
+            " via_record_id, path_role, epoch) VALUES (?,?,?,?,?)",
+            (workspace_id, src, via, role, epoch),
+        )
+        tx.execute(
+            "UPDATE task_state SET status='PENDING_REEVALUATION', reevaluation_reason=?"
+            " WHERE workspace_id=? AND task_object_id IN"
+            " (SELECT object_id FROM record WHERE record_id=? AND kind='TASK_REVISION'"
+            " AND json_extract(payload,'$._validation') IS NULL)"
+            " AND current_revision=?"
+            " AND status IN ('DRAFT','ACTIVE')",
+            (f"invalidated_via:{root_record_id}", workspace_id, src, src),
+        )
+    _refresh_tasks(tx, workspace_id, f"invalidated_via:{root_record_id}", metrics)
+    return len(reached)
+
+
+def _refresh_tasks(conn, workspace_id, reason="dependency_changed", metrics=None):
+    for row in conn.execute(
+        "SELECT r.payload,r.record_id,t.task_object_id FROM task_state t JOIN record r"
+        " ON r.record_id=t.current_revision WHERE t.workspace_id=?"
+        " AND t.status IN ('ACTIVE','DRAFT')", (workspace_id,)).fetchall():
+        validation = json.loads(row["payload"]).get("_validation")
+        from .evidence import eligible
+        if validation and (not eligible(conn, workspace_id, row["record_id"]) or
+                           validation["stamp"] != current_stamp(conn, workspace_id, validation["roots"], metrics)):
+            conn.execute("UPDATE task_state SET status='PENDING_REEVALUATION',"
+                         " reevaluation_reason=? WHERE workspace_id=? AND task_object_id=?",
+                         (reason, workspace_id, row["task_object_id"]))
 
 
 def _advance_watermark(tx, workspace_id: str) -> None:
@@ -116,13 +122,13 @@ def _advance_watermark(tx, workspace_id: str) -> None:
         " VALUES (?,?,?,?)"
         " ON CONFLICT(index_name) DO UPDATE SET applied_sequence=excluded.applied_sequence,"
         " validation_epoch=excluded.validation_epoch, updated_at=excluded.updated_at",
-        (PROJECTION_INDEX, _head(tx, workspace_id), _epoch(tx, workspace_id), _now()),
+        (PROJECTION_INDEX + ":" + workspace_id, _head(tx, workspace_id), _epoch(tx, workspace_id), _now()),
     )
 
 
-def watermark(conn: sqlite3.Connection) -> dict | None:
+def watermark(conn: sqlite3.Connection, workspace_id: str) -> dict | None:
     row = conn.execute(
-        "SELECT * FROM index_watermark WHERE index_name=?", (PROJECTION_INDEX,)
+        "SELECT * FROM index_watermark WHERE index_name=?", (PROJECTION_INDEX + ":" + workspace_id,)
     ).fetchone()
     if row is None:
         return None
@@ -140,7 +146,7 @@ def read_gate(conn: sqlite3.Connection, workspace_id: str, deps: list[str],
     ).fetchall()]
     hit = sorted(set(deps) & set(pending_roots)) if deps else []
     ws_epoch = _epoch(conn, workspace_id)
-    wm = watermark(conn)
+    wm = watermark(conn, workspace_id)
     wm_epoch = wm["validation_epoch"] if wm else 1
 
     if purpose == "critical":
@@ -153,6 +159,10 @@ def read_gate(conn: sqlite3.Connection, workspace_id: str, deps: list[str],
         if ws_epoch > wm_epoch:
             raise AsgError("E401", "投影水位落后于验证纪元",
                            details={"watermark_epoch": wm_epoch, "workspace_epoch": ws_epoch})
+        from .evidence import eligible
+        invalid = [rid for rid in deps if not eligible(conn, workspace_id, rid)]
+        if invalid:
+            raise AsgError("E401", "关键读取依赖无效或求值不完整", details={"invalid": invalid})
         return {"stale": False}
     return {"stale": bool(hit or pending_roots or ws_epoch > wm_epoch),
             "reason": "invalidation_pending" if (hit or pending_roots) else "watermark_behind"

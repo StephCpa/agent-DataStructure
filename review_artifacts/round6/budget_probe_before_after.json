@@ -1,0 +1,49 @@
+{
+  "round5": {
+    "default": {
+      "four_state": "SUPPORTED",
+      "supported": true,
+      "refuted": false,
+      "truncated": true,
+      "support": null,
+      "refutation": null,
+      "evaluation_status": null,
+      "exhausted_budget": null,
+      "budget_used": null
+    },
+    "larger": {
+      "four_state": "CONTESTED",
+      "truncated": false
+    },
+    "executed": true,
+    "calls": 1,
+    "error": null
+  },
+  "round6": {
+    "default": {
+      "four_state": "INCOMPLETE",
+      "supported": true,
+      "refuted": false,
+      "truncated": true,
+      "support": "FOUND",
+      "refutation": "UNKNOWN",
+      "evaluation_status": "INCOMPLETE",
+      "exhausted_budget": [
+        "max_paths"
+      ],
+      "budget_used": {
+        "paths": 16,
+        "recompute": 34,
+        "max_depth": 1,
+        "cache_hits": 0
+      }
+    },
+    "larger": {
+      "four_state": "CONTESTED",
+      "truncated": false
+    },
+    "executed": false,
+    "calls": 0,
+    "error": "E401"
+  }
+}

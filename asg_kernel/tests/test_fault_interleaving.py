@@ -114,6 +114,7 @@ class TestLeaseExpiryLateReceipt(unittest.TestCase):
 
     def test_late_receipt_after_reconcile_keeps_terminal_state(self):
         conn, svc, ledger, auth, gw = stack()
+        self.addCleanup(conn.close)
         remote = KeyedRemote()
         p = intent()
         r = prepare(conn, auth, gw, p)
@@ -148,6 +149,7 @@ class TestQueryBecomesVisible(unittest.TestCase):
 
     def test_unknown_resolves_when_query_becomes_final(self):
         conn, svc, ledger, auth, gw = stack()
+        self.addCleanup(conn.close)
         remote = QueryOnlyRemote(invisible_rounds=2)
         p = intent(mode="QUERY_ONLY")
         r = prepare(conn, auth, gw, p)
@@ -179,6 +181,7 @@ class TestHistoricalReadAfterPurge(unittest.TestCase):
 
     def test_replay_before_purge_does_not_revive(self):
         conn, svc, _, _, _ = stack()
+        self.addCleanup(conn.close)
         obs = svc.observe(WS, {
             "source": {"connector_identity": "web.fetch@v2",
                        "url_or_handle": "https://secret.example/old",
@@ -232,6 +235,7 @@ class TestReconcileConflict(unittest.TestCase):
 
     def test_contradictory_query_keeps_success_and_flags_conflict(self):
         conn, svc, ledger, auth, gw = stack()
+        self.addCleanup(conn.close)
         remote = ConflictingRemote(query_outcome="CONFIRMED_NOT_APPLIED")
         p = intent()
         r = prepare(conn, auth, gw, p)
@@ -262,6 +266,7 @@ class TestNotAppliedThenLateSuccess(unittest.TestCase):
 
     def test_late_success_after_not_applied_is_conflict(self):
         conn, svc, ledger, auth, gw = stack()
+        self.addCleanup(conn.close)
         remote = ConflictingRemote(query_outcome="CONFIRMED_NOT_APPLIED")
         p = intent()
         r = prepare(conn, auth, gw, p)
@@ -271,8 +276,11 @@ class TestNotAppliedThenLateSuccess(unittest.TestCase):
         ctx = gw.begin_attempt(WS, r["intent_id"], cl["token"])
         conn.execute("UPDATE effect_outbox SET claim_expires_at='2000-01-01T00:00:00Z'"
                      " WHERE intent_id=?", (r["intent_id"],))
-        out = gw.run_once(r["intent_id"], remote)
-        self.assertEqual(out["state"], "CONFIRMED_NOT_APPLIED")
+        # Deliberate contradictory trusted receipts test, NOT evidence that a
+        # mere negative key query closes future sends (round-seven contract).
+        state = gw.record_response(WS, ctx["attempt_id"],
+                                   {"outcome": "CONFIRMED_NOT_APPLIED", "clause": "injected final rejection"})
+        self.assertEqual(state, "CONFIRMED_NOT_APPLIED")
         self.assertEqual(ledger.balance("ws:compute.gpu")["reserved"], 0)
 
         # 迟到的成功回执到达：确定性证据互相矛盾，保留冲突并不结算成功

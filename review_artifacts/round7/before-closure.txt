@@ -1,0 +1,36 @@
+test_live_predispatch_worker_is_closed_before_releasing_liability (tests.test_persistent_recovery.TestPersistentRecovery.test_live_predispatch_worker_is_closed_before_releasing_liability) ... FAIL
+test_negative_query_without_closure_retains_liability_until_old_worker_succeeds (tests.test_persistent_recovery.TestPersistentRecovery.test_negative_query_without_closure_retains_liability_until_old_worker_succeeds) ... FAIL
+
+======================================================================
+FAIL: test_live_predispatch_worker_is_closed_before_releasing_liability (tests.test_persistent_recovery.TestPersistentRecovery.test_live_predispatch_worker_is_closed_before_releasing_liability)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_persistent_recovery.py", line 171, in test_live_predispatch_worker_is_closed_before_releasing_liability
+    self.predispatch_worker(closure=True)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_persistent_recovery.py", line 160, in predispatch_worker
+    self.assertEqual(late["remote"]["effects"], 0 if closure else 1)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0
+
+======================================================================
+FAIL: test_negative_query_without_closure_retains_liability_until_old_worker_succeeds (tests.test_persistent_recovery.TestPersistentRecovery.test_negative_query_without_closure_retains_liability_until_old_worker_succeeds)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_persistent_recovery.py", line 174, in test_negative_query_without_closure_retains_liability_until_old_worker_succeeds
+    self.predispatch_worker(closure=False)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_persistent_recovery.py", line 151, in predispatch_worker
+    self.assertEqual(reconciled["effect"]["state"],
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                     "CONFIRMED_NOT_APPLIED" if closure else "OUTCOME_UNKNOWN")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'CONFIRMED_SUCCEEDED' != 'OUTCOME_UNKNOWN'
+- CONFIRMED_SUCCEEDED
++ OUTCOME_UNKNOWN
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 1.707s
+
+FAILED (failures=2)

@@ -16,6 +16,7 @@ from . import evidence
 from .errors import AsgError
 from .ids import digest_obj, uuid7
 from .invalidation import read_gate
+from .dependencies import current_stamp
 
 TOKENIZER_VERSION = "simple-v1"
 RETRIEVAL_VERSION = "retrieval-v1"
@@ -46,14 +47,14 @@ def _snapshot(conn, workspace_id: str) -> dict:
         "head_sequence": row["head_sequence"] if row else 0,
         "validation_epoch": row["validation_epoch"] if row else 1,
         "policy_epoch": row["policy_epoch"] if row else 1,
-        "reducer_version": 1,
+        "reducer_version": 3,
     }
 
 
 def binding_unit(conn, workspace_id: str, record_id: str) -> dict | None:
     """绑定单元组装（7.4 节步骤 3）：正文片段 + 状态 + 关键来源指针 + 约束。"""
     row = conn.execute("SELECT * FROM record WHERE record_id=?", (record_id,)).fetchone()
-    if row is None or row["kind"] not in ALLOWED_KINDS:
+    if row is None or row["workspace_id"] != workspace_id or row["kind"] not in ALLOWED_KINDS:
         return None
     if conn.execute("SELECT 1 FROM tombstone WHERE record_id=? AND mode='purge'",
                     (record_id,)).fetchone():
@@ -66,6 +67,8 @@ def binding_unit(conn, workspace_id: str, record_id: str) -> dict | None:
         unit = {
             "record_id": record_id, "kind": row["kind"], "text": str(text),
             "four_state": state["four_state"],
+            "evaluation_status": state["evaluation_status"],
+            "exhausted_budget": state["exhausted_budget"],
             "unresolved_conflict": state["four_state"] == "CONTESTED",
             "units_field": payload.get("units"),
             "valid_time": payload.get("valid_time"),
@@ -100,6 +103,32 @@ def deterministic_ledger_query(conn, workspace_id: str, kind: str) -> int:
 def project_context(conn, svc, workspace_id: str, required_ids: list[str],
                     candidate_ids: list[str], token_budget: int,
                     task_revision_id: str | None = None) -> dict:
+    """Read and certify one SQLite snapshot; concurrent writes require rebuilding.
+
+    Deferred WAL transaction permits a writer during construction. Upgrading a
+    stale read snapshot to a write fails rather than certifying old rendering.
+    This also covers ledger/watermark inputs not versioned by head_sequence.
+    """
+    if conn.in_transaction or svc.conn is not conn:
+        raise AsgError("E702", "Context requires its own transaction on the service connection")
+    conn.execute("BEGIN")
+    try:
+        result = _project_in_txn(conn, svc, workspace_id, required_ids, candidate_ids,
+                                 token_budget, task_revision_id)
+        conn.execute("COMMIT")
+        return result
+    except sqlite3.OperationalError as error:
+        conn.rollback()
+        if getattr(error, "sqlite_errorcode", 0) & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            raise AsgError("E702", "Context read snapshot changed; rebuild required", retryable=True) from error
+        raise
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _project_in_txn(conn, svc, workspace_id, required_ids, candidate_ids, token_budget,
+                    task_revision_id):
     """上下文投影（7.4 节）：过滤 -> 绑定单元 -> M 预算检查 -> U 填充 -> 清单落账。"""
     # 探索检索走闸门但不阻断：显式标注陈旧
     gate = read_gate(conn, workspace_id, required_ids + candidate_ids, purpose="exploratory")
@@ -138,14 +167,15 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
 
     labels = sorted({l for u in selected for l in u.get("data_labels", [])})
     snap = _snapshot(conn, workspace_id)
+    ledger_inputs = {"claim_count": deterministic_ledger_query(conn, workspace_id, "CLAIM")}
     rendered = json.dumps(
         {"units": [{k: v for k, v in u.items() if k != "record_id"} or u for u in selected],
-         "ledger": {"claim_count":
-                    deterministic_ledger_query(conn, workspace_id, "CLAIM")}},
+         "ledger": ledger_inputs},
         ensure_ascii=False, sort_keys=True)
     manifest_payload = {
         "context_id": "ctx-" + uuid7(),
         "snapshot": snap,
+        "ledger_inputs": ledger_inputs,
         "task_revision_id": task_revision_id,
         "selected_items": [{"record_id": u["record_id"], "span": u.get("span"),
                             "transform_id": "identity@1"} for u in selected],
@@ -169,13 +199,13 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
         "policy_domain": "default",
         "payload": manifest_payload,
         "typed_refs": [{"role": "selected_into", "target_record_id": rid}
-                       for rid in dict.fromkeys(required_ids + candidate_ids)],
+                       for rid in dict.fromkeys(u["record_id"] for u in selected)],
         "prior_revision_ids": [],
     }
     head = conn.execute(
         "SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
     ).fetchone()["head_sequence"]
-    result = svc.submit_proposal(workspace_id, [record], head, "req-" + uuid7())
+    result = svc.commit_in_txn(conn, workspace_id, "main", [record], head, "req-" + uuid7())
     return {
         "context_manifest_id": manifest_payload["context_id"],
         "commit": result,
@@ -189,13 +219,19 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
 
 def manifest_valid(conn, workspace_id: str, manifest_record_id: str) -> bool:
     """清单有效性：命中失效标记或策略纪元变更即过期（E702 语义）。"""
-    row = conn.execute("SELECT payload FROM record WHERE record_id=? AND kind='CONTEXT_MANIFEST'",
-                       (manifest_record_id,)).fetchone()
+    row = conn.execute("SELECT payload FROM record WHERE record_id=? AND workspace_id=? AND kind='CONTEXT_MANIFEST'",
+                       (manifest_record_id, workspace_id)).fetchone()
     if row is None:
         return False
     p = json.loads(row["payload"])
     if _policy_epoch(conn, workspace_id) != p.get("policy_epoch"):
         return False
+    if "ledger_inputs" in p and p["ledger_inputs"] != {
+            "claim_count": deterministic_ledger_query(conn, workspace_id, "CLAIM")}:
+        return False
+    validation = p.get("_validation")
+    if validation:
+        return validation["stamp"] == current_stamp(conn, workspace_id, validation["roots"])
     hit = conn.execute(
         "SELECT 1 FROM invalidation_mark WHERE workspace_id=? AND record_id=?",
         (workspace_id, manifest_record_id),

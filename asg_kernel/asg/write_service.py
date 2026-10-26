@@ -19,7 +19,7 @@ from .errors import AsgError
 from .ids import digest_obj, uuid7
 from .storage import write_txn
 
-REDUCER_VERSION = 1
+REDUCER_VERSION = 3
 
 
 def _now() -> str:
@@ -51,6 +51,11 @@ class WriteService:
                         principal: dict | None = None, branch_id: str = "main") -> dict:
         request_digest = request_digest or digest_obj(records)
         principal = principal or {"kind": "service", "id": "write-service"}
+
+        if branch_id != "main":
+            raise AsgError("E104", f"分支 {branch_id!r} 尚未支持，当前仅接受 main")
+        if request_digest != digest_obj(records):
+            raise AsgError("E202", "请求摘要与记录内容不一致")
 
         # 快速路径：事务外先查幂等（摘要由服务计算，调用方传入值仅供比对）
         row = self.conn.execute(
@@ -106,12 +111,14 @@ class WriteService:
             raise _EarlyExit(self._commit_result(dup, replayed=True))
 
         # schema 与类型校验 + 写入边界契约
+        records = [registry.normalize_record(rec) for rec in records]
         for rec in records:
             registry.validate_record(rec)
+            if rec["workspace_id"] != workspace_id:
+                raise AsgError("E303", "记录信封与提交工作空间不一致")
             registry.validate_kind_phase(rec["kind"])
             self._enforce_issuer(rec, principal)
-            self._enforce_revision_baseline(conn, workspace_id, rec)
-            self._enforce_refs(conn, workspace_id, rec)
+            self._enforce_refs(conn, workspace_id, rec, {r.get("record_id") for r in records})
 
         ws = conn.execute(
             "SELECT * FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
@@ -180,7 +187,37 @@ class WriteService:
         )
         retire_roots = []
         for rec in assigned:
+            # Validate against heads advanced by earlier records in this transaction.
+            self._enforce_revision_baseline(conn, workspace_id, rec)
+            for parent_id in rec.get("prior_revision_ids", []):
+                parent = conn.execute("SELECT object_id,kind FROM record WHERE record_id=?",
+                                      (parent_id,)).fetchone()
+                if parent["object_id"] != rec["object_id"] or parent["kind"] != rec["kind"]:
+                    raise AsgError("E203", "父版本必须属于同一对象和记录类型")
+            if rec["kind"] == "JUSTIFICATION":
+                target = conn.execute("SELECT kind FROM record WHERE record_id=?",
+                                      (rec["payload"]["target_claim_id"],)).fetchone()
+                if target is None or target["kind"] != "CLAIM":
+                    raise AsgError("E101", "论证目标必须是 CLAIM")
+            if rec["kind"] in {"TASK_REVISION", "CONTEXT_MANIFEST"}:
+                from .dependencies import current_stamp
+                from .evidence import eligible_new_task
+                is_task = rec["kind"] == "TASK_REVISION"
+                roots = (sorted({r["target_record_id"] for r in rec.get("typed_refs", [])
+                                 if r["role"] in {"derived_from", "extracted_from", "transcribed_from",
+                                                  "uses_version", "depends_on", "selected_into"}}) if is_task else
+                         [item["record_id"] for item in rec["payload"]["selected_items"]])
+                rec["payload"]["_validation"] = {
+                    "stamp": current_stamp(conn, workspace_id, roots),
+                    "roots": roots,
+                    "status": ("ACTIVE" if eligible_new_task(conn, workspace_id, roots, seq)
+                               else "PENDING_REEVALUATION")
+                              if is_task else "SNAPSHOT",
+                }
             payload_json = json.dumps(rec["payload"], ensure_ascii=False, sort_keys=True)
+            asserted_source = rec.get("asserted_source")
+            if asserted_source is None and rec.get("authenticated_writer") != principal:
+                asserted_source = rec.get("authenticated_writer")
             conn.execute(
                 "INSERT INTO record (record_id, object_id, workspace_id, branch_id, kind,"
                 " schema_version, authenticated_writer, asserted_source, recorded_at,"
@@ -188,7 +225,7 @@ class WriteService:
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (rec["record_id"], rec["object_id"], workspace_id, branch_id, rec["kind"],
                  rec["schema_version"], json.dumps(principal),
-                 json.dumps(rec["asserted_source"]) if rec.get("asserted_source") else None,
+                 json.dumps(asserted_source) if asserted_source is not None else None,
                  recorded_at, digest_obj(rec["payload"]), payload_json,
                  rec["policy_domain"], commit_id, seq),
             )
@@ -216,6 +253,12 @@ class WriteService:
                      len(payload_json_c), "inline:" + rec["record_id"]),
                 )
             for ref in rec.get("typed_refs", []):
+                if ref["role"] in {"derived_from", "extracted_from", "transcribed_from"}:
+                    if conn.execute(
+                        "SELECT 1 FROM tombstone WHERE workspace_id=? AND record_id=? AND mode='purge'",
+                        (workspace_id, ref["target_record_id"]),
+                    ).fetchone():
+                        raise AsgError("E802", "禁止从已删除的记录创建新的派生副本")
                 dst = conn.execute(
                     "SELECT object_id FROM record WHERE record_id=?", (ref["target_record_id"],)
                 ).fetchone()
@@ -230,11 +273,12 @@ class WriteService:
             if rec["kind"] == "TASK_REVISION":
                 conn.execute(
                     "INSERT INTO task_state (workspace_id, task_object_id, status, current_revision)"
-                    " VALUES (?,?, 'ACTIVE', ?)"
+                    " VALUES (?,?, ?, ?)"
                     " ON CONFLICT(workspace_id, task_object_id) DO UPDATE SET"
                     " current_revision=excluded.current_revision,"
-                    " status=CASE WHEN task_state.status='DRAFT' THEN 'ACTIVE' ELSE task_state.status END",
-                    (workspace_id, rec["payload"]["task_object_id"], rec["record_id"]),
+                    " status=excluded.status, reevaluation_reason=NULL",
+                    (workspace_id, rec["payload"]["task_object_id"],
+                     rec["payload"]["_validation"]["status"], rec["record_id"]),
                 )
             if rec["kind"] == "RETIRE_PURGE_MARK":
                 # 失效根是被撤回/更正的目标记录，不是标记本身（4.2 节 invalidation_queue）
@@ -277,21 +321,23 @@ class WriteService:
         """supersedes 必须指向该对象当前头；全局 expected_head 不能替代对象级基线（I4）。"""
         supersedes = [r["target_record_id"] for r in rec.get("typed_refs", [])
                       if r.get("role") == "supersedes"]
-        if not supersedes:
-            return
         head = conn.execute(
             "SELECT head_record_id FROM object_heads WHERE workspace_id=? AND object_id=?",
             (workspace_id, rec["object_id"]),
         ).fetchone()
-        if head is None or head["head_record_id"] not in supersedes:
+        if head is None and not supersedes:
+            return
+        if head is None or supersedes != [head["head_record_id"]]:
             raise AsgError("E203", "修订基线与当前头不一致（supersedes 须指向对象当前版本）",
                            details={"expected": supersedes,
                                     "current": head["head_record_id"] if head else None})
 
-    def _enforce_refs(self, conn, workspace_id: str, rec: dict) -> None:
+    def _enforce_refs(self, conn, workspace_id: str, rec: dict, batch_ids=()) -> None:
         """引用与父版本校验：父版本（prior_revision_ids）必须已存在（E301）；
         一切引用不得跨工作空间（E303）。typed_refs 的存在性与批内拓扑由后续步骤校验。"""
         for tid in rec.get("prior_revision_ids", []):
+            if tid in batch_ids:
+                continue  # Full ordered existence check follows ID assignment.
             row = conn.execute(
                 "SELECT workspace_id FROM record WHERE record_id=?", (tid,)
             ).fetchone()

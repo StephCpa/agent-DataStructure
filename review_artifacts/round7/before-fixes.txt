@@ -1,0 +1,67 @@
+test_writer_between_units_and_snapshot_rejected_then_fresh_render_succeeds (tests.test_round7_boundaries.TestContextSnapshot.test_writer_between_units_and_snapshot_rejected_then_fresh_render_succeeds) ... FAIL
+test_identity_mismatch_rolls_back_batch_and_valid_revision_recovers (tests.test_round7_boundaries.TestTaskIdentity.test_identity_mismatch_rolls_back_batch_and_valid_revision_recovers) ... FAIL
+test_task_own_withdrawal_is_pending_online_and_replay (tests.test_round7_boundaries.TestTaskIdentity.test_task_own_withdrawal_is_pending_online_and_replay) ... FAIL
+test_uses_version_checked_at_creation_and_after_withdrawal (tests.test_round7_boundaries.TestTaskIdentity.test_uses_version_checked_at_creation_and_after_withdrawal) ... FAIL
+test_reconcile_commit_exit_before_retry_then_restart (tests.test_persistent_recovery.TestPersistentRecovery.test_reconcile_commit_exit_before_retry_then_restart) ... FAIL
+
+======================================================================
+FAIL: test_writer_between_units_and_snapshot_rejected_then_fresh_render_succeeds (tests.test_round7_boundaries.TestContextSnapshot.test_writer_between_units_and_snapshot_rejected_then_fresh_render_succeeds)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_round7_boundaries.py", line 100, in test_writer_between_units_and_snapshot_rejected_then_fresh_render_succeeds
+    with self.assertRaises(AsgError) as cm:
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+AssertionError: AsgError not raised
+
+======================================================================
+FAIL: test_identity_mismatch_rolls_back_batch_and_valid_revision_recovers (tests.test_round7_boundaries.TestTaskIdentity.test_identity_mismatch_rolls_back_batch_and_valid_revision_recovers)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_round7_boundaries.py", line 37, in test_identity_mismatch_rolls_back_batch_and_valid_revision_recovers
+    with self.assertRaises(AsgError) as cm:
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+AssertionError: AsgError not raised
+
+======================================================================
+FAIL: test_task_own_withdrawal_is_pending_online_and_replay (tests.test_round7_boundaries.TestTaskIdentity.test_task_own_withdrawal_is_pending_online_and_replay)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_round7_boundaries.py", line 54, in test_task_own_withdrawal_is_pending_online_and_replay
+    self.assertEqual(Projection(self.s.conn).live_task_state(WS)[WS + ":A"]["status"], "PENDING_REEVALUATION")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'ACTIVE' != 'PENDING_REEVALUATION'
+- ACTIVE
++ PENDING_REEVALUATION
+
+
+======================================================================
+FAIL: test_uses_version_checked_at_creation_and_after_withdrawal (tests.test_round7_boundaries.TestTaskIdentity.test_uses_version_checked_at_creation_and_after_withdrawal)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_round7_boundaries.py", line 65, in test_uses_version_checked_at_creation_and_after_withdrawal
+    self.assertEqual(Projection(self.s.conn).live_task_state(WS)[WS + ":" + task]["status"], "PENDING_REEVALUATION")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'ACTIVE' != 'PENDING_REEVALUATION'
+- ACTIVE
++ PENDING_REEVALUATION
+
+
+======================================================================
+FAIL: test_reconcile_commit_exit_before_retry_then_restart (tests.test_persistent_recovery.TestPersistentRecovery.test_reconcile_commit_exit_before_retry_then_restart)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_persistent_recovery.py", line 87, in test_reconcile_commit_exit_before_retry_then_restart
+    self.success(self.worker("recover"), attempts=2)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\KM\Agent DATAStructure\asg_kernel\tests\test_persistent_recovery.py", line 37, in success
+    self.assertEqual(state["effect"]["state"], "CONFIRMED_SUCCEEDED")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'CONFIRMED_NOT_APPLIED' != 'CONFIRMED_SUCCEEDED'
+- CONFIRMED_NOT_APPLIED
++ CONFIRMED_SUCCEEDED
+
+
+----------------------------------------------------------------------
+Ran 5 tests in 1.139s
+
+FAILED (failures=5)

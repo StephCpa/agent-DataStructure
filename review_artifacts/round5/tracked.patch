@@ -1,0 +1,1200 @@
+diff --git a/asg_kernel/README.md b/asg_kernel/README.md
+index 35a56e8..c469902 100644
+--- a/asg_kernel/README.md
++++ b/asg_kernel/README.md
+@@ -14,7 +14,7 @@ cd asg_kernel
+ python -m unittest discover -s tests -t . -v
+ ```
+ 
+-45 项测试全部通过（含跨模块契约回归）。阶段 A 验收：I1–I5 无反例、TC-INV-01 至 04 与 TC-03 通过
++当前工作树 **75 项测试全部通过**（2026-10-26 复核，详见 [审核与推进记录](AUDIT_2026-10-26.md)）。阶段 A 验收：I1–I5 无反例、TC-INV-01 至 04 与 TC-03 通过
+ （另含 TC-INV-05）；阶段 B 验收：TC-04（I6）、TC-05（回执前崩溃，I7）、
+ TC-06（租约过期去重）及预算授权原子集成通过；阶段 C 验收：TC-01（失效传播
+ 精确撤销）、TC-02（冲突 CONTESTED 不自动覆盖）、TC-07（删除复活阻止，I10）、
+@@ -34,7 +34,7 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | `asg/storage.py` | SQLite 开发适配层：表结构、不可变触发器、约束 | 第 4 章 |
+ | `asg/errors.py` | 错误码目录 A/B 子集 | 第 10 章 |
+ | `asg/invalidation.py` | M3/M6 失效传播：反向依赖闭包（DERIVATION/CONTROL 边）、任务待重评、投影水位、read_gate 闸门（critical 拒绝 / exploratory 陈旧标注） | 7.3 |
+-| `asg/evidence.py` | M3 证据求值：OR-of-AND 支持电路、规则全局合取、四态（含 CONTESTED）、预算截断 truncated、来源谱系根去重 | 3.6 / 7.2 |
++| `asg/evidence.py` | M3 证据求值：OR-of-AND 支持电路、规则/假设按论证独立合取、四态（含 CONTESTED）、预算截断 truncated、来源谱系根去重 | 3.6 / 7.2 |
+ | `asg/context.py` | M3 上下文投影：绑定单元组装、必需约束预算检查（E701）、候选裁剪入 omitted 摘要、标签并集、清单落账与有效期 | 3.12 / 7.4 |
+ | `asg/purge.py` | M4 删除域：retire_or_purge（墓碑先行 + policy_epoch 推进 + 在线清理 + 派生再生计划）、读取门控（E802 复活阻止） | 7.8 / 9.4 |
+ | `asg/ids.py` | UUIDv7 标识、规范化 JSON 与 SHA-256 摘要 | 3.1 / 9.1 |
+@@ -100,12 +100,11 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ 
+ ## 里程碑状态（eb1381b 评审收敛后）
+ 
+-> 阶段 A/B/C 的主要接口与执行路径已实现，51 项测试通过（含跨模块契约回归、
+-> 故障交错轨迹，以及 60 条随机轨迹的状态机组合不变量检查）。
+-> **阶段 D 的契约前置已满足**：正式收益比较可以启动。随机轨迹覆盖的不变量为：
+-> 账本与预留行恒等且不越额、committed 单调不减、CONFIRMED_SUCCEEDED 不被离开、
+-> 离开 CONFIRMED_NOT_APPLIED 必带冲突标记、成功后不再产生外部调用、
+-> 授权占用不超过 use_limit。
++> 阶段 A/B/C 的主要接口与执行路径已实现，当前 75 项测试通过。
++> 原四轮提交的 58 项测试已复核通过；本轮新增 17 项测试，包括 40 条证据/删除交错。
++> **仅在已测输入与故障集合内验收，阶段 D 正式收益比较仍需强基线与额外契约验收。**
++> 执行域为 60 条 × 12 事件；证据/删除域为 40 条 × 6 事件，两套生成器尚未合并。
++> 测试数量不构成完整契约证明。第二、三层真实模型评估尚未开始。
+ 
+ 本轮收敛（对应评审反例，回归用例见 `tests/test_contract_regression.py`）：
+ 
+@@ -123,7 +122,7 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | 派生副本随源记录隔离；复活阻止按稳定内容身份（来源+片段），采集时间变化不能绕过 | purge / write_service |
+ | 失效传播后的任务待重评状态可由 reducer 重建，在线与回放一致 | projection |
+ 
+-第三轮补充（故障交错轨迹，见 `tests/test_fault_interleaving.py`，5 项）：
++第二轮补充（故障交错轨迹，见 `tests/test_fault_interleaving.py`，5 项）：
+ 
+ | 轨迹 | 验收结果 |
+ |------|---------|
+@@ -133,18 +132,18 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | 已确认成功后对账返回未生效 | E605 显式保留冲突，状态与已结算预算不被覆盖 |
+ | 先确认未生效并释放预留，随后迟到成功回执 | 不静默改为成功，committed 保持 0 |
+ 
+-第四轮（状态机组合，见 `tests/test_state_machine_combinations.py`）：固定种子生成
++第三轮（状态机组合，见 `tests/test_state_machine_combinations.py`）：固定种子生成
+ 60 条轨迹、每条 12 个随机事件（run / 租约过期 / 重试到期 / 迟到回执），
+ 连接器的调用结果与查询可见性同样由种子决定。每步之后检查六条不变量
+ （账本恒等与额度、committed 单调、成功态不离开、未生效态离开必带冲突标记、
+ 成功后无新外部调用、授权占用不超限），全部通过。
+ 
+-## 阶段 D 第一层（已启动）
++## 第四轮：阶段 D 第一层场景脚手架
+ 
+ `eval/systems.py` 与 `tests/test_baseline_comparison.py` 用确定性记录和假工具，
+-把 ASG 与一个简单基线放在同一批故障场景上对比。基线 = 消息列表 + 事实就地覆盖
+-+ 操作名称级授权 + 崩溃后盲目重试 + 软删除 + 先读后写的预算判断，对应说明书
+-第 3 章候选表里“消息数组加摘要”与“成熟工作流加 SQL 版本和 outbox”的最小组合。
++把 ASG 与显式缺少保护机制的朴素对照放在相同故障场景上。对照采用消息列表、
++事实就地覆盖、操作名称级授权、盲目重试、软删除和先读后写预算判断。
++它没有实现 SQL 事务、版本日志和持久化 outbox，**不能代表成熟工作流**。
+ 
+ | 场景（说明书 13.3 节） | ASG | 基线 |
+ |---|---|---|
+@@ -156,6 +155,22 @@ TC-08（来源谱系不作独立验证）、TC-09（必需约束超预算 E701
+ | 删除后读旧副本 / 重新采集 | 均 E802 | 旧副本仍可读，重新采集不受限 |
+ | 撤回后在线状态与回放对比 | 一致 | 无历史可回放 |
+ 
+-基线的失败是该方案的固有行为，用作对照而非待修复缺陷。这一层隔离了模型随机性；
+-第二层（自然语言抽取对照 oracle）与第三层（完整任务成功率与成本）尚未开始，
+-且组合测试仍未覆盖随机化的证据链与删除域交错。
++这些失败只说明场景能检出被关闭的机制，不能推出相对成熟系统的收益。
++本轮增加正常成功对照、明确的 E401/E402 断言及外部调用计数；恢复重发保留原参数。
++正式比较还需要具有原子预算、内容授权、持久化 outbox、查询/幂等恢复与版本日志的对照，
++分别统计调用次数和实际副作用次数，并报告开销。
++
++## 第五轮：本次审核后的推进
++
++- 补齐 Justification 到目标 Claim 的求值传播关系，在线与回放共用依赖闭包；
++  Claim 的重算标记不等于全部支持无效，独立支持路径保留。
++- 传播排空时也重验历史撤回根，覆盖撤回之后追加的新依赖；当前采用全图扫描，尚未优化性能。
++- 直接撤回 Claim 后不再允许其作为动作前提。
++- 同步隔离完整显式派生闭包，统一副本的稳定来源/片段身份，阻止副本重新采集和从已删除记录新建副本。
++- 读取核对工作空间；清单引用仅绑定实际选中项，省略项不触发错误失效。
++- 修订不能省略 supersedes，批内按已推进的对象头检查；幂等快路径仍校验分支；保存自报身份声明。
++- 执行轨迹拒绝静默跳过准备失败和非预期错误，断言 60 条、720 步及两类连接器实际覆盖。
++- 新增 14 项跨域测试（其中 1 项运行 40 条/240 事件），2 项生成器防空通过测试，1 项正常执行对照。
++
++验证范围仍是内存 SQLite 与假连接器。任务回放比较在传播完成后进行；完整账本/授权恢复、
++论证修订选择、递归求值预算、真实并发进程和真实模型评估仍需继续验收。
+diff --git a/asg_kernel/asg/context.py b/asg_kernel/asg/context.py
+index 1d9b106..447a665 100644
+--- a/asg_kernel/asg/context.py
++++ b/asg_kernel/asg/context.py
+@@ -53,7 +53,7 @@ def _snapshot(conn, workspace_id: str) -> dict:
+ def binding_unit(conn, workspace_id: str, record_id: str) -> dict | None:
+     """绑定单元组装（7.4 节步骤 3）：正文片段 + 状态 + 关键来源指针 + 约束。"""
+     row = conn.execute("SELECT * FROM record WHERE record_id=?", (record_id,)).fetchone()
+-    if row is None or row["kind"] not in ALLOWED_KINDS:
++    if row is None or row["workspace_id"] != workspace_id or row["kind"] not in ALLOWED_KINDS:
+         return None
+     if conn.execute("SELECT 1 FROM tombstone WHERE record_id=? AND mode='purge'",
+                     (record_id,)).fetchone():
+@@ -169,7 +169,7 @@ def project_context(conn, svc, workspace_id: str, required_ids: list[str],
+         "policy_domain": "default",
+         "payload": manifest_payload,
+         "typed_refs": [{"role": "selected_into", "target_record_id": rid}
+-                       for rid in dict.fromkeys(required_ids + candidate_ids)],
++                       for rid in dict.fromkeys(u["record_id"] for u in selected)],
+         "prior_revision_ids": [],
+     }
+     head = conn.execute(
+diff --git a/asg_kernel/asg/evidence.py b/asg_kernel/asg/evidence.py
+index 64e3b6a..f8fcf85 100644
+--- a/asg_kernel/asg/evidence.py
++++ b/asg_kernel/asg/evidence.py
+@@ -104,15 +104,15 @@ def eligible(conn, workspace_id: str, record_id: str, as_of: int | None = None,
+     主张成员递归求值：作为支持成员的 Claim 只有自身正向支持成立才合格
+     （评审反例：O→C1→C2 撤回 O 后 C2 仍 SUPPORTED）。循环引用不凭空产生支持。
+     """
+-    row = conn.execute("SELECT sequence, kind FROM record WHERE record_id=?",
++    row = conn.execute("SELECT sequence, kind, workspace_id FROM record WHERE record_id=?",
+                        (record_id,)).fetchone()
+-    if row is None:
++    if row is None or row["workspace_id"] != workspace_id:
+         return False
+     if as_of is not None and row["sequence"] > as_of:
+         return False
+     if record_id in _retired_roots(conn, workspace_id):
+         return False
+-    if _marked(conn, workspace_id, record_id):
++    if row["kind"] != "CLAIM" and _marked(conn, workspace_id, record_id):
+         return False
+     if _purged(conn, record_id):
+         return False
+@@ -147,12 +147,19 @@ def evaluate_support(conn, workspace_id: str, claim_record_id: str,
+         (workspace_id, as_of, claim_record_id),
+     ).fetchall()
+ 
++    target = conn.execute("SELECT workspace_id, sequence FROM record WHERE record_id=?",
++                          (claim_record_id,)).fetchone()
++    if (target is None or target["workspace_id"] != workspace_id
++            or target["sequence"] > as_of
++            or claim_record_id in _retired_roots(conn, workspace_id)
++            or _purged(conn, claim_record_id)):
++        justs = []
+     supporting, refuting, evaluated, truncated = [], [], 0, False
+     for j in justs:
+         p = json.loads(j["payload"])
+         # 论证自身被撤回：整条路径退出。论证被标记只表示其依赖有变更，
+         # 成员资格在下方逐组重算——标记本身不使全部 OR 分支失效（TC-01 语义）
+-        if j["record_id"] in _retired_roots(conn, workspace_id):
++        if j["record_id"] in _retired_roots(conn, workspace_id) or _purged(conn, j["record_id"]):
+             continue
+         # 规则与假设按论证独立合取（不跨论证合并）
+         prereq_ok = all(eligible(conn, workspace_id, r, as_of, _stack)
+diff --git a/asg_kernel/asg/invalidation.py b/asg_kernel/asg/invalidation.py
+index a92857c..ae769f6 100644
+--- a/asg_kernel/asg/invalidation.py
++++ b/asg_kernel/asg/invalidation.py
+@@ -14,6 +14,7 @@ from __future__ import annotations
+ import sqlite3
+ from datetime import datetime, timezone
+ 
++from .dependencies import closure, load_graph
+ from .errors import AsgError
+ from .storage import write_txn
+ 
+@@ -49,6 +50,13 @@ def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int =
+                 " ORDER BY item_id LIMIT 1", (workspace_id,),
+             ).fetchone()
+             if item is None:
++                # Dependencies may have been appended after an earlier withdrawal
++                # was drained. Recompute the current graph before declaring it caught up.
++                for retired in tx.execute(
++                    "SELECT root_record_id, MAX(epoch) AS epoch FROM invalidation_queue"
++                    " WHERE workspace_id=? GROUP BY root_record_id", (workspace_id,),
++                ).fetchall():
++                    _propagate_closure(tx, workspace_id, retired["root_record_id"], retired["epoch"])
+                 _advance_watermark(tx, workspace_id)
+                 break
+             tx.execute("UPDATE invalidation_queue SET status='PROCESSING' WHERE item_id=?",
+@@ -62,45 +70,21 @@ def process_queue(conn: sqlite3.Connection, workspace_id: str, max_items: int =
+ 
+ def _propagate_closure(tx, workspace_id: str, root_record_id: str, epoch: int) -> int:
+     """反向依赖闭包：root 自身与全部上游依赖者打标（via 为其直接依赖的下游记录）。"""
+-    visited = {root_record_id}
+-    frontier = [root_record_id]
+-    affected = 0
+-    while frontier:
+-        q = ", ".join("?" * len(frontier))
+-        rows = tx.execute(
+-            f"SELECT src_record_id, dst_record_id, ref_role FROM record_ref"
+-            f" WHERE dst_record_id IN ({q}) AND ref_layer IN {PROPAGATING_LAYERS}",
+-            tuple(frontier),
+-        ).fetchall()
+-        next_frontier = []
+-        for r in rows:
+-            src = r["src_record_id"]
+-            if src in visited:
+-                continue
+-            visited.add(src)
+-            next_frontier.append(src)
+-            tx.execute(
+-                "INSERT OR IGNORE INTO invalidation_mark (workspace_id, record_id,"
+-                " via_record_id, path_role, epoch) VALUES (?,?,?,?,?)",
+-                (workspace_id, src, r["dst_record_id"], r["ref_role"], epoch),
+-            )
+-            affected += 1
+-            kind = tx.execute("SELECT kind FROM record WHERE record_id=?", (src,)).fetchone()
+-            if kind is None:
+-                continue
+-            if kind["kind"] == "TASK_REVISION":
+-                # 任务前提命中失效：进入待重评（6.5 节）
+-                tx.execute(
+-                    "UPDATE task_state SET status='PENDING_REEVALUATION',"
+-                    " reevaluation_reason=? WHERE workspace_id=? AND task_object_id IN"
+-                    " (SELECT object_id FROM record WHERE record_id=?)"
+-                    " AND status IN ('DRAFT','ACTIVE')",
+-                    (f"invalidated_via:{root_record_id}", workspace_id, src),
+-                )
+-            # CLAIM / JUSTIFICATION / CONTEXT_MANIFEST 命中标记即可：
+-            # 求值按成员资格精确重算（7.2 节），清单读取按 mark 判过期
+-        frontier = next_frontier
+-    return affected
++    reached = closure(load_graph(tx, workspace_id), [root_record_id])
++    for src, (via, role) in reached.items():
++        tx.execute(
++            "INSERT OR IGNORE INTO invalidation_mark (workspace_id, record_id,"
++            " via_record_id, path_role, epoch) VALUES (?,?,?,?,?)",
++            (workspace_id, src, via, role, epoch),
++        )
++        tx.execute(
++            "UPDATE task_state SET status='PENDING_REEVALUATION', reevaluation_reason=?"
++            " WHERE workspace_id=? AND task_object_id IN"
++            " (SELECT object_id FROM record WHERE record_id=? AND kind='TASK_REVISION')"
++            " AND status IN ('DRAFT','ACTIVE')",
++            (f"invalidated_via:{root_record_id}", workspace_id, src),
++        )
++    return len(reached)
+ 
+ 
+ def _advance_watermark(tx, workspace_id: str) -> None:
+diff --git a/asg_kernel/asg/projection.py b/asg_kernel/asg/projection.py
+index e7e178e..b1f5e6d 100644
+--- a/asg_kernel/asg/projection.py
++++ b/asg_kernel/asg/projection.py
+@@ -8,6 +8,8 @@ from __future__ import annotations
+ import json
+ import sqlite3
+ 
++from .dependencies import closure, reverse_dependencies
++
+ 
+ def reducer_v1(records: list[dict], refs: list[dict] | None = None) -> dict:
+     """reducer 版本 1：按提交序重放 object_heads 与 task_state。
+@@ -18,7 +20,6 @@ def reducer_v1(records: list[dict], refs: list[dict] | None = None) -> dict:
+     """
+     heads: dict[str, dict] = {}
+     tasks: dict[str, dict] = {}
+-    task_deps: dict[str, set] = {}   # task_record_id -> 依赖的记录 id 集
+     record_by_id: dict[str, dict] = {}
+     for rec in records:
+         ws, obj, rid, seq = rec["workspace_id"], rec["object_id"], rec["record_id"], rec["sequence"]
+@@ -32,19 +33,20 @@ def reducer_v1(records: list[dict], refs: list[dict] | None = None) -> dict:
+             prev = tasks.get((ws, task_obj), {"status": "DRAFT"})
+             status = "ACTIVE" if prev["status"] in ("DRAFT",) else prev["status"]
+             tasks[(ws, task_obj)] = {"status": status, "current_revision": rid}
+-    for ref in refs or []:
+-        if ref["role"] == "depends_on":
+-            task_deps.setdefault(ref["src"], set()).add(ref["dst"])
+     # 失效标记重建任务重评：标记目标命中任务依赖闭包即进入待重评
+     retired = set()
+     for rec in records:
+         if rec["kind"] == "RETIRE_PURGE_MARK":
+             payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
+             retired.add(payload["target"]["record_id"])
+-    for (ws, task_obj), st in tasks.items():
+-        deps = task_deps.get(st["current_revision"], set())
+-        if deps & retired and st["status"] == "ACTIVE":
+-            st["status"] = "PENDING_REEVALUATION"
++    affected = closure(reverse_dependencies(records, refs or []), retired)
++    for rid in affected:
++        rec = record_by_id[rid]
++        if rec["kind"] == "TASK_REVISION":
++            payload = json.loads(rec["payload"]) if isinstance(rec["payload"], str) else rec["payload"]
++            st = tasks[(rec["workspace_id"], payload["task_object_id"])]
++            if st["status"] == "ACTIVE":
++                st["status"] = "PENDING_REEVALUATION"
+     return {"object_heads": {f"{k[0]}:{k[1]}": v for k, v in heads.items()},
+             "task_state": {f"{k[0]}:{k[1]}": v for k, v in tasks.items()}}
+ 
+diff --git a/asg_kernel/asg/purge.py b/asg_kernel/asg/purge.py
+index 489a70a..fae3b58 100644
+--- a/asg_kernel/asg/purge.py
++++ b/asg_kernel/asg/purge.py
+@@ -13,6 +13,7 @@ from __future__ import annotations
+ import json
+ from datetime import datetime, timezone
+ 
++from .dependencies import closure, load_graph
+ from .errors import AsgError
+ from .ids import digest_obj, uuid7
+ from .storage import write_txn
+@@ -41,6 +42,8 @@ class Purger:
+                 row = conn.execute("SELECT * FROM record WHERE record_id=?", (rid,)).fetchone()
+                 if row is None:
+                     raise AsgError("E801", f"范围解析失败，记录不存在: {rid}")
++                if row["workspace_id"] != workspace_id:
++                    raise AsgError("E303", "删除目标不属于当前工作空间")
+                 targets.append(row)
+             marks = [{
+                 "workspace_id": workspace_id,
+@@ -56,7 +59,7 @@ class Purger:
+             } for t in targets]
+             # commit_in_txn 内部落失效根入队与 epoch 推进（阶段 A/B 已有路径）
+             result = self.svc.commit_in_txn(conn, workspace_id, "main", marks,
+-                                            expected_head, request_id)
++                                            expected_head, request_id, principal=principal)
+             if mode == "purge":
+                 conn.execute(
+                     "UPDATE workspace_epoch SET policy_epoch = policy_epoch + 1"
+@@ -64,7 +67,11 @@ class Purger:
+                 pe = conn.execute(
+                     "SELECT policy_epoch FROM workspace_epoch WHERE workspace_id=?",
+                     (workspace_id,)).fetchone()["policy_epoch"]
+-                for t in targets:
++                affected_ids = closure(load_graph(conn, workspace_id, lineage_only=True),
++                                       [t["record_id"] for t in targets])
++                isolated = [conn.execute("SELECT * FROM record WHERE record_id=?", (rid,)).fetchone()
++                            for rid in affected_ids]
++                for t in isolated:
+                     # 墓碑按稳定内容身份登记（来源+片段），与复活检查同一口径
+                     p = json.loads(t["payload"]) if t["kind"] == "OBSERVATION" else None
+                     content_id = (digest_obj({"source": p.get("source"), "span": p.get("span")})
+@@ -76,23 +83,8 @@ class Purger:
+                         (workspace_id, t["object_id"], t["record_id"], content_id,
+                          t["policy_domain"], _now(), pe),
+                     )
+-                    # 派生副本隔离：显式声明派生自被删记录的在线副本同步墓碑
+-                    # （正文再生完成前先隔离，评审反例：派生副本仍可读）
+-                    for d in conn.execute(
+-                        "SELECT r.record_id, r.object_id, r.payload_digest, r.policy_domain"
+-                        " FROM record_ref rr JOIN record r ON r.record_id = rr.src_record_id"
+-                        " WHERE rr.dst_record_id=? AND rr.ref_role IN"
+-                        " ('derived_from','extracted_from','transcribed_from')",
+-                        (t["record_id"],),
+-                    ).fetchall():
+-                        conn.execute(
+-                            "INSERT OR IGNORE INTO tombstone (workspace_id, object_id, record_id,"
+-                            " payload_digest, policy_domain, mode, purged_at, policy_epoch)"
+-                            " VALUES (?,?,?,?,?, 'purge', ?, ?)",
+-                            (workspace_id, d["object_id"], d["record_id"], d["payload_digest"],
+-                             d["policy_domain"], _now(), pe),
+-                        )
+-        cleanup = self._cleanup_online(targets) if mode == "purge" else {"blobs": 0}
++        if mode == "purge":
++            self._cleanup_online(isolated)
+         return {"commit_id": result["commit_id"], "sequence": result["sequence"],
+                 "mode": mode, "targets": [t["record_id"] for t in targets],
+                 "derived_regeneration_plan": self._regeneration_plan(workspace_id, targets)
+@@ -107,27 +99,16 @@ class Purger:
+                 ("inline:" + t["record_id"],),
+             )
+             n += cur.rowcount
+-            for d in self.conn.execute(
+-                "SELECT src_record_id FROM record_ref WHERE dst_record_id=? AND ref_role IN"
+-                " ('derived_from','extracted_from','transcribed_from')", (t["record_id"],),
+-            ).fetchall():
+-                cur = self.conn.execute(
+-                    "UPDATE blob_object SET deletion_state='purged' WHERE storage_uri=?",
+-                    ("inline:" + d["src_record_id"],),
+-                )
+-                n += cur.rowcount
+         return {"blobs": n}
+ 
+     def _regeneration_plan(self, workspace_id: str, targets) -> list[dict]:
+         """派生再生计划：仍获准使用的证据重新生成干净派生内容（9.4 节）。"""
+         plan = []
++        graph = load_graph(self.conn, workspace_id, lineage_only=True)
+         for t in targets:
+-            dependents = self.conn.execute(
+-                "SELECT DISTINCT src_record_id FROM record_ref WHERE dst_record_id=?",
+-                (t["record_id"],),
+-            ).fetchall()
++            dependents = set(closure(graph, [t["record_id"]])) - {t["record_id"]}
+             plan.append({"purged": t["record_id"],
+-                         "dependents_to_regenerate": [d["src_record_id"] for d in dependents]})
++                         "dependents_to_regenerate": sorted(dependents)})
+         return plan
+ 
+     def read_record(self, workspace_id: str, record_id: str) -> dict:
+@@ -135,6 +116,8 @@ class Purger:
+         row = self.conn.execute("SELECT * FROM record WHERE record_id=?", (record_id,)).fetchone()
+         if row is None:
+             raise AsgError("E801", f"记录不存在: {record_id}")
++        if row["workspace_id"] != workspace_id:
++            raise AsgError("E303", "读取目标不属于当前工作空间")
+         hit = self.conn.execute(
+             "SELECT 1 FROM tombstone WHERE workspace_id=? AND record_id=?",
+             (workspace_id, record_id),
+diff --git a/asg_kernel/asg/write_service.py b/asg_kernel/asg/write_service.py
+index 6a60dbd..ba94f9e 100644
+--- a/asg_kernel/asg/write_service.py
++++ b/asg_kernel/asg/write_service.py
+@@ -52,6 +52,11 @@ class WriteService:
+         request_digest = request_digest or digest_obj(records)
+         principal = principal or {"kind": "service", "id": "write-service"}
+ 
++        if branch_id != "main":
++            raise AsgError("E104", f"分支 {branch_id!r} 尚未支持，当前仅接受 main")
++        if request_digest != digest_obj(records):
++            raise AsgError("E202", "请求摘要与记录内容不一致")
++
+         # 快速路径：事务外先查幂等（摘要由服务计算，调用方传入值仅供比对）
+         row = self.conn.execute(
+             'SELECT * FROM "commit" WHERE workspace_id=? AND request_id=?',
+@@ -110,7 +115,6 @@ class WriteService:
+             registry.validate_record(rec)
+             registry.validate_kind_phase(rec["kind"])
+             self._enforce_issuer(rec, principal)
+-            self._enforce_revision_baseline(conn, workspace_id, rec)
+             self._enforce_refs(conn, workspace_id, rec)
+ 
+         ws = conn.execute(
+@@ -180,7 +184,12 @@ class WriteService:
+         )
+         retire_roots = []
+         for rec in assigned:
++            # Validate against heads advanced by earlier records in this transaction.
++            self._enforce_revision_baseline(conn, workspace_id, rec)
+             payload_json = json.dumps(rec["payload"], ensure_ascii=False, sort_keys=True)
++            asserted_source = rec.get("asserted_source")
++            if asserted_source is None and rec.get("authenticated_writer") != principal:
++                asserted_source = rec.get("authenticated_writer")
+             conn.execute(
+                 "INSERT INTO record (record_id, object_id, workspace_id, branch_id, kind,"
+                 " schema_version, authenticated_writer, asserted_source, recorded_at,"
+@@ -188,7 +197,7 @@ class WriteService:
+                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (rec["record_id"], rec["object_id"], workspace_id, branch_id, rec["kind"],
+                  rec["schema_version"], json.dumps(principal),
+-                 json.dumps(rec["asserted_source"]) if rec.get("asserted_source") else None,
++                 json.dumps(asserted_source) if asserted_source is not None else None,
+                  recorded_at, digest_obj(rec["payload"]), payload_json,
+                  rec["policy_domain"], commit_id, seq),
+             )
+@@ -216,6 +225,12 @@ class WriteService:
+                      len(payload_json_c), "inline:" + rec["record_id"]),
+                 )
+             for ref in rec.get("typed_refs", []):
++                if ref["role"] in {"derived_from", "extracted_from", "transcribed_from"}:
++                    if conn.execute(
++                        "SELECT 1 FROM tombstone WHERE workspace_id=? AND record_id=? AND mode='purge'",
++                        (workspace_id, ref["target_record_id"]),
++                    ).fetchone():
++                        raise AsgError("E802", "禁止从已删除的记录创建新的派生副本")
+                 dst = conn.execute(
+                     "SELECT object_id FROM record WHERE record_id=?", (ref["target_record_id"],)
+                 ).fetchone()
+@@ -277,13 +292,13 @@ class WriteService:
+         """supersedes 必须指向该对象当前头；全局 expected_head 不能替代对象级基线（I4）。"""
+         supersedes = [r["target_record_id"] for r in rec.get("typed_refs", [])
+                       if r.get("role") == "supersedes"]
+-        if not supersedes:
+-            return
+         head = conn.execute(
+             "SELECT head_record_id FROM object_heads WHERE workspace_id=? AND object_id=?",
+             (workspace_id, rec["object_id"]),
+         ).fetchone()
+-        if head is None or head["head_record_id"] not in supersedes:
++        if head is None and not supersedes:
++            return
++        if head is None or supersedes != [head["head_record_id"]]:
+             raise AsgError("E203", "修订基线与当前头不一致（supersedes 须指向对象当前版本）",
+                            details={"expected": supersedes,
+                                     "current": head["head_record_id"] if head else None})
+diff --git a/asg_kernel/eval/systems.py b/asg_kernel/eval/systems.py
+index 291d736..4d448e5 100644
+--- a/asg_kernel/eval/systems.py
++++ b/asg_kernel/eval/systems.py
+@@ -1,11 +1,9 @@
+ """阶段 D 第一层的两个被测系统（说明书 13.1 节：确定性记录 + 假工具）。
+ 
+ - AsgSystem：包装 asg 内核。
+-- BaselineSystem：消息列表 + 事实就地覆盖 + 操作名称级授权 + 盲目重试的 outbox
+-  + 软删除。这是说明书第 3 章候选表里“消息数组加摘要”与“成熟工作流加
+-  SQL 版本和 outbox”的最小组合，故意保留这些方案被 ASG 针对的缺陷：
+-  新消息覆盖旧事实、授权不绑定内容、未知结果直接重发、删除可被旧副本复活、
+-  预算先读后写。
++- BaselineSystem：显式关闭依赖、内容绑定、对账、删除域和原子额度检查的朴素对照。
++  它用于检查场景是否能检出这些缺失机制，不代表成熟工作流、SQL 或 outbox。
++  当前结果不能用于推断 ASG 相对这些系统的收益。
+ """
+ from __future__ import annotations
+ 
+@@ -70,6 +68,7 @@ class AsgSystem:
+         self.ledger.ensure_budget(BUDGET_KEY, 100)
+         self._grants: dict[str, str] = {}
+         self._intent: str | None = None
++        self.last_error: str | None = None
+ 
+     def _head(self) -> int:
+         row = self.conn.execute(
+@@ -122,18 +121,25 @@ class AsgSystem:
+         return g["grant_id"]
+ 
+     def act(self, grant_id: str, content: str, preconditions: list[str]) -> bool:
++        self.last_error = None
+         payload = self._payload(content, preconditions)
+         try:
+             res = self.gw.prepare_effect(WS, payload, self._head(), "req-" + uuid7(),
+                                          grant_id, [{"resource_key": BUDGET_KEY, "amount": 10}])
+-        except AsgError:
++        except AsgError as error:
++            if error.code not in {"E401", "E402", "E403", "E501"}:
++                raise
++            self.last_error = error.code
+             return False
+         self._intent = res["intent_id"]
+         try:
+-            self.gw.run_once(self._intent, self.remote)
+-        except AsgError:
++            result = self.gw.run_once(self._intent, self.remote)
++        except AsgError as error:
++            if error.code not in {"E401", "E402", "E403"}:
++                raise
++            self.last_error = error.code
+             return False
+-        return True
++        return result is not None and result["state"] == "CONFIRMED_SUCCEEDED"
+ 
+     def start_and_crash(self, grant_id: str, content: str) -> None:
+         """外部调用已成功，但回执持久化前崩溃（租约过期）。"""
+@@ -188,7 +194,9 @@ class AsgSystem:
+             self.ledger.reserve(WS, "intent-" + uuid7(),
+                                 [{"resource_key": BUDGET_KEY, "amount": amount}])
+             return True
+-        except AsgError:
++        except AsgError as error:
++            if error.code != "E501":
++                raise
+             return False
+ 
+     def replay_consistent(self) -> bool:
+@@ -208,6 +216,7 @@ class BaselineSystem:
+         self.facts: dict[str, str] = {}          # claim -> SUPPORTED / OVERWRITTEN
+         self.grants: dict[str, str] = {}         # grant -> 操作名（不绑定内容）
+         self.pending = False
++        self.pending_arguments: dict = {}
+         self.limit = 100.0
+         self.used = 0.0
+         self._snap: float | None = None
+@@ -239,15 +248,19 @@ class BaselineSystem:
+         return gid
+ 
+     def act(self, grant_id: str, content: str, preconditions: list[str]) -> bool:
+-        return grant_id in self.grants           # 不核对内容，不检查前提
++        if grant_id not in self.grants:
++            return False
++        self.remote.call("compute.job.submit", {"config": content}, None)
++        return True                             # 不核对内容，不检查前提
+ 
+     def start_and_crash(self, grant_id: str, content: str) -> None:
+         self.remote.call("compute.job.submit", {"config": content}, None)
++        self.pending_arguments = {"config": content}
+         self.pending = True                      # 没有结果记录，只知道“还没确认”
+ 
+     def recover(self) -> str:
+         if self.pending:                         # 盲目重发
+-            self.remote.call("compute.job.submit", {}, None)
++            self.remote.call("compute.job.submit", self.pending_arguments, None)
+             self.pending = False
+         return "RETRIED"
+ 
+diff --git a/asg_kernel/tests/test_baseline_comparison.py b/asg_kernel/tests/test_baseline_comparison.py
+index 17a5d24..08d5f5c 100644
+--- a/asg_kernel/tests/test_baseline_comparison.py
++++ b/asg_kernel/tests/test_baseline_comparison.py
+@@ -1,9 +1,7 @@
+ """阶段 D 第一层：ASG 与简单基线在同一批故障场景上的对比。
+ 
+-场景取自说明书第 13.3 节的对抗清单。每个场景对两个系统施加相同操作序列，
+-断言 ASG 满足契约；基线按“消息列表 + 就地覆盖 + 名称级授权 + 盲目重试”
+-的固有行为失败。基线的失败是预期结果，用来说明结构带来的差异，
+-不是待修复缺陷。
++场景取自说明书第 13.3 节的对抗清单。朴素对照显式缺少待测机制，
++失败只能证明场景能检出这些机制缺失，不是成熟工作流的收益比较。
+ """
+ from __future__ import annotations
+ 
+@@ -29,6 +27,9 @@ class TestStaleEvidenceBlocksAction(unittest.TestCase):
+                 system.withdraw(obs)
+                 executed = system.act(grant, "config-v1", [claim])
+                 self.assertEqual(executed, not expect_blocked)
++                self.assertEqual(system.remote.calls, 0 if expect_blocked else 1)
++                if expect_blocked:
++                    self.assertEqual(system.last_error, "E401")
+                 system.close()
+ 
+ 
+@@ -57,6 +58,9 @@ class TestGrantBindsContent(unittest.TestCase):
+                 grant = system.grant("config-v7")
+                 executed = system.act(grant, "config-v8", [])
+                 self.assertEqual(executed, expect_allowed)
++                self.assertEqual(system.remote.calls, 1 if expect_allowed else 0)
++                if not expect_allowed:
++                    self.assertEqual(system.last_error, "E402")
+                 system.close()
+ 
+ 
+@@ -118,5 +122,17 @@ class TestReplay(unittest.TestCase):
+                 system.close()
+ 
+ 
++class TestHealthyControl(unittest.TestCase):
++    def test_valid_action_reaches_remote_in_both_systems(self):
++        for system in systems():
++            try:
++                obs = system.observe("https://healthy/source")
++                claim = system.claim("valid fact", [obs])
++                self.assertTrue(system.act(system.grant("config-v1"), "config-v1", [claim]))
++                self.assertEqual(system.remote.calls, 1)
++            finally:
++                system.close()
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/asg_kernel/tests/test_contract_regression.py b/asg_kernel/tests/test_contract_regression.py
+index 4497cd1..7125eb9 100644
+--- a/asg_kernel/tests/test_contract_regression.py
++++ b/asg_kernel/tests/test_contract_regression.py
+@@ -86,6 +86,7 @@ class TestForgedReceiptRejected(unittest.TestCase):
+ 
+     def test_forged_receipt_does_not_settle(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         r = prepare(conn, auth, gw, intent_payload())
+         claim_row = gw.claim(r["intent_id"])
+         ctx = gw.begin_attempt(WS, r["intent_id"], claim_row["token"])
+@@ -121,6 +122,7 @@ class TestMultilevelEvidenceChain(unittest.TestCase):
+ 
+     def test_chain_invalidation_blocks_action(self):
+         conn, svc, _, auth, gw = stack()
++        self.addCleanup(conn.close)
+         o = observe(svc, url="https://src.example/only")
+         c1 = claim(svc)
+         justify(svc, WS, c1, [[o]], expected_head=head(conn))
+@@ -142,6 +144,7 @@ class TestMultilevelEvidenceChain(unittest.TestCase):
+ 
+     def test_rule_assumption_and_justification_retirement(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         # 规则只约束自己的论证：撤回规则不影响另一条独立论证
+         o1, o2 = observe(svc, "https://a.example/1"), observe(svc, "https://b.example/2")
+         rule = observe(svc, "https://rules.example/r1")
+@@ -178,6 +181,7 @@ class TestUnknownDoesNotRedispatch(unittest.TestCase):
+ 
+     def test_query_only_unknown_reconciles_instead_of_redispatch(self):
+         conn, svc, _, auth, gw = stack()
++        self.addCleanup(conn.close)
+ 
+         class QueryOnly(Connector):
+             def __init__(self):
+@@ -215,6 +219,7 @@ class TestGrantRevocationSeparated(unittest.TestCase):
+ 
+     def test_revoke_after_prepare_blocks_dispatch(self):
+         conn, svc, _, auth, gw = stack()
++        self.addCleanup(conn.close)
+         p = intent_payload()
+         h = head(conn)
+         g = auth.issue_grant(WS, APPROVER, AGENT, compute_operation_digest(p),
+@@ -234,6 +239,7 @@ class TestConfirmedNotOverwritten(unittest.TestCase):
+ 
+     def test_late_query_error_keeps_success(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+ 
+         class Keyed(Connector):
+             def __init__(self):
+@@ -267,6 +273,7 @@ class TestReplayConsistency(unittest.TestCase):
+ 
+     def test_pending_reevaluation_replays(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         o = observe(svc, "https://plan.example/input")
+         task_obj = "task-" + uuid7()
+         svc.submit_proposal(WS, [{
+@@ -289,6 +296,7 @@ class TestManifestBinding(unittest.TestCase):
+ 
+     def test_selected_candidate_invalidates_manifest(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         c_req = claim(svc)
+         o_cand = observe(svc, "https://cand.example/x")
+         out = project_context(conn, svc, WS, required_ids=[c_req],
+@@ -301,6 +309,7 @@ class TestManifestBinding(unittest.TestCase):
+ 
+     def test_missing_required_is_explicit_failure(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         o = observe(svc, "https://must.example/y")
+         Purger(conn, svc).retire_or_purge(WS, [o], head(conn), "req-" + uuid7(),
+                                           AGENT, mode="purge")
+@@ -315,6 +324,7 @@ class TestDerivedIsolation(unittest.TestCase):
+ 
+     def test_derived_copy_isolated_and_reimport_blocked(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         src = observe(svc, "https://secret.example/page")
+         copy = svc.observe(WS, {
+             "source": {"connector_identity": "web.fetch@v2",
+@@ -352,6 +362,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_stale_object_baseline_rejected(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         task_obj = "task-" + uuid7()
+         base = {"task_object_id": task_obj, "goal": "v1", "acceptance_refs": ["a"]}
+ 
+@@ -375,6 +386,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_prior_revision_must_exist(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         with self.assertRaises(AsgError) as cm:
+             svc.submit_proposal(WS, [{
+                 "workspace_id": WS, "object_id": "o1", "kind": "CLAIM", "schema_version": 1,
+@@ -386,6 +398,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_cross_workspace_ref_rejected(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         other = observe(svc)
+         # 把观察改记为另一工作空间（直接构造第二个工作空间的记录）
+         svc.submit_proposal("ws-other", [{
+@@ -409,6 +422,7 @@ class TestWriteBoundaryContracts(unittest.TestCase):
+ 
+     def test_digest_computed_by_service_and_branch_rejected(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         rid = "req-fixed"
+         svc.observe(WS, {"source": {"connector_identity": "x", "url_or_handle": "u1",
+                                     "content_version": "1"},
+diff --git a/asg_kernel/tests/test_fault_interleaving.py b/asg_kernel/tests/test_fault_interleaving.py
+index 8f01a79..01d2ee5 100644
+--- a/asg_kernel/tests/test_fault_interleaving.py
++++ b/asg_kernel/tests/test_fault_interleaving.py
+@@ -114,6 +114,7 @@ class TestLeaseExpiryLateReceipt(unittest.TestCase):
+ 
+     def test_late_receipt_after_reconcile_keeps_terminal_state(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = KeyedRemote()
+         p = intent()
+         r = prepare(conn, auth, gw, p)
+@@ -148,6 +149,7 @@ class TestQueryBecomesVisible(unittest.TestCase):
+ 
+     def test_unknown_resolves_when_query_becomes_final(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = QueryOnlyRemote(invisible_rounds=2)
+         p = intent(mode="QUERY_ONLY")
+         r = prepare(conn, auth, gw, p)
+@@ -179,6 +181,7 @@ class TestHistoricalReadAfterPurge(unittest.TestCase):
+ 
+     def test_replay_before_purge_does_not_revive(self):
+         conn, svc, _, _, _ = stack()
++        self.addCleanup(conn.close)
+         obs = svc.observe(WS, {
+             "source": {"connector_identity": "web.fetch@v2",
+                        "url_or_handle": "https://secret.example/old",
+@@ -232,6 +235,7 @@ class TestReconcileConflict(unittest.TestCase):
+ 
+     def test_contradictory_query_keeps_success_and_flags_conflict(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = ConflictingRemote(query_outcome="CONFIRMED_NOT_APPLIED")
+         p = intent()
+         r = prepare(conn, auth, gw, p)
+@@ -262,6 +266,7 @@ class TestNotAppliedThenLateSuccess(unittest.TestCase):
+ 
+     def test_late_success_after_not_applied_is_conflict(self):
+         conn, svc, ledger, auth, gw = stack()
++        self.addCleanup(conn.close)
+         remote = ConflictingRemote(query_outcome="CONFIRMED_NOT_APPLIED")
+         p = intent()
+         r = prepare(conn, auth, gw, p)
+diff --git a/asg_kernel/tests/test_phase_a.py b/asg_kernel/tests/test_phase_a.py
+index 48a1b9a..14e1626 100644
+--- a/asg_kernel/tests/test_phase_a.py
++++ b/asg_kernel/tests/test_phase_a.py
+@@ -57,6 +57,7 @@ def submit_observation(svc, head, url="https://example.org/spec"):
+ class TestHappyPath(unittest.TestCase):
+     def test_observe_claim_task_invalidate(self):
+         conn, svc, _, proj = make_service()
++        self.addCleanup(conn.close)
+         r1 = submit_observation(svc, 0)
+         self.assertEqual(r1["sequence"], 1)
+         self.assertEqual(r1["snapshot"]["head_sequence"], 1)
+@@ -89,6 +90,7 @@ class TestINV01Immutable(unittest.TestCase):
+ 
+     def test_direct_mutation_rejected(self):
+         conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         r = submit_observation(svc, 0)
+         rid = r["record_ids"][0]
+         with self.assertRaises(sqlite3.DatabaseError) as cm:
+@@ -105,7 +107,8 @@ class TestINV02FutureRef(unittest.TestCase):
+     """TC-INV-02：不引用未来记录（I2）；不存在引用（E301）。"""
+ 
+     def test_batch_future_ref_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         id_a, id_b = str(uuid.uuid4()), str(uuid.uuid4())
+         rec_a = {
+             "workspace_id": WS, "record_id": id_a, "object_id": "obj-a", "kind": "CLAIM",
+@@ -124,7 +127,8 @@ class TestINV02FutureRef(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E302")
+ 
+     def test_nonexistent_ref_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         rec = {
+             "workspace_id": WS, "object_id": "obj-c", "kind": "CLAIM",
+             "schema_version": 1, "authenticated_writer": PRINCIPAL, "policy_domain": "default",
+@@ -138,6 +142,7 @@ class TestINV02FutureRef(unittest.TestCase):
+ 
+     def test_batch_prior_ref_accepted(self):
+         conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         id_b = str(uuid.uuid4())
+         rec_b = {
+             "workspace_id": WS, "record_id": id_b, "object_id": "obj-b", "kind": "OBSERVATION",
+@@ -161,7 +166,8 @@ class TestINV03RequestIdReuse(unittest.TestCase):
+     """TC-INV-03：同一 request_id 不接受不同内容（I3）；同内容幂等重放。"""
+ 
+     def test_reuse_with_different_content(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         rid = "req-fixed-1"
+         svc.observe(WS, obs_payload("https://a.example/1"), 0, rid, PRINCIPAL)
+         with self.assertRaises(AsgError) as cm:
+@@ -169,7 +175,8 @@ class TestINV03RequestIdReuse(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E202")
+ 
+     def test_identical_replay_returns_original(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         rid = "req-fixed-2"
+         payload = obs_payload("https://a.example/3")
+         obj = "obs-" + uuid7()  # 幂等重放要求请求内容完全一致：同一 object_id
+@@ -184,7 +191,8 @@ class TestINV04ConcurrentRevise(unittest.TestCase):
+     """TC-INV-04：并发 revise 竞争——expected_head 冲突（E201）与基线不匹配（E203）。"""
+ 
+     def test_stale_expected_head_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         submit_observation(svc, 0)                     # seq 1
+         submit_observation(svc, 1, url="https://b.example/1")  # seq 2
+         with self.assertRaises(AsgError) as cm:        # 携带过期 head=0
+@@ -193,7 +201,8 @@ class TestINV04ConcurrentRevise(unittest.TestCase):
+         self.assertEqual(cm.exception.details["current_head"], 2)
+ 
+     def test_task_baseline_mismatch_rejected(self):
+-        _, svc, _, _ = make_service()
++        conn, svc, _, _ = make_service()
++        self.addCleanup(conn.close)
+         tp1 = task_payload()
+         r1 = svc.submit_proposal(WS, [{
+             "workspace_id": WS, "object_id": tp1["task_object_id"], "kind": "TASK_REVISION",
+@@ -218,7 +227,8 @@ class TestINV05ReplayDeterminism(unittest.TestCase):
+     """TC-INV-05：回放重建投影与在线投影逐字段一致（I9 的确定性基础）。"""
+ 
+     def test_replay_matches_live(self):
+-        _, svc, _, proj = make_service()
++        conn, svc, _, proj = make_service()
++        self.addCleanup(conn.close)
+         r1 = submit_observation(svc, 0)
+         claim_obj = "claim-" + uuid7()
+         svc.claim(WS, claim_payload(), 1, "req-" + uuid7(), PRINCIPAL, object_id=claim_obj,
+@@ -247,7 +257,8 @@ class TestTC03Budget(unittest.TestCase):
+     """TC-03：预算 100，两个 Agent 各预留 60——第二笔拒绝且失败可解释（I5）。"""
+ 
+     def test_double_reserve_rejected_with_details(self):
+-        _, _, ledger, _ = make_service()
++        conn, _, ledger, _ = make_service()
++        self.addCleanup(conn.close)
+         ledger.ensure_budget("ws:compute.gpu", 100)
+         r1 = ledger.reserve(WS, "intent-a", [{"resource_key": "ws:compute.gpu", "amount": 60}])
+         self.assertEqual(len(r1), 1)
+@@ -270,7 +281,8 @@ class TestTC03Budget(unittest.TestCase):
+ 
+     def test_unknown_retains_reservation(self):
+         """UNKNOWN 保留占用（6.3 节）：uncertain 期间余量不回升。"""
+-        _, _, ledger, _ = make_service()
++        conn, _, ledger, _ = make_service()
++        self.addCleanup(conn.close)
+         ledger.ensure_budget("ws:compute.gpu", 100)
+         r1 = ledger.reserve(WS, "intent-a", [{"resource_key": "ws:compute.gpu", "amount": 60}])
+         self.assertEqual(ledger.settle(r1[0], "UNKNOWN"), "uncertain")
+diff --git a/asg_kernel/tests/test_phase_b.py b/asg_kernel/tests/test_phase_b.py
+index 5c8e41e..95f68b3 100644
+--- a/asg_kernel/tests/test_phase_b.py
++++ b/asg_kernel/tests/test_phase_b.py
+@@ -121,6 +121,7 @@ def make_due(conn, intent_id):
+ class TestHappyPathDispatch(unittest.TestCase):
+     def test_prepare_dispatch_settle(self):
+         conn, svc, ledger, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote()
+         r = prepare(gw, 0)
+         out = gw.run_once(r["intent_id"], remote)
+@@ -148,7 +149,8 @@ class TestTC04GrantBinding(unittest.TestCase):
+     """TC-04 / I6：审批后改参数、接收者或产物——新动作不能借用旧授权。"""
+ 
+     def test_modified_arguments_rejected(self):
+-        _, svc, _, auth, gw = make_stack()
++        conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         v7 = intent_payload()
+         grant = issue_grant_for(auth, v7, head=0)
+         prepare(gw, 1, payload=v7, grant=grant["grant_id"])  # v7 获批并准备成功
+@@ -159,7 +161,8 @@ class TestTC04GrantBinding(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E402")
+ 
+     def test_target_out_of_scope_rejected(self):
+-        _, svc, _, auth, gw = make_stack()
++        conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload(target_ids=["cluster-b/other-queue"])
+         # 摘要与参数一致，但授权的目标范围只批准了 DEST：范围检查拒绝（E402）
+         grant = auth.issue_grant(
+@@ -170,7 +173,8 @@ class TestTC04GrantBinding(unittest.TestCase):
+         self.assertEqual(cm.exception.code, "E402")
+ 
+     def test_expired_and_revoked_and_exhausted(self):
+-        _, svc, _, auth, gw = make_stack()
++        conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload()
+         # 过期授权在 prepare 即被拒
+         expired = auth.issue_grant(WS, APPROVER, AGENT,
+@@ -206,6 +210,7 @@ class TestTC05CrashBeforeReceipt(unittest.TestCase):
+ 
+     def test_reconcile_by_key_confirms_success(self):
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote()
+         r = prepare(gw, 0)
+         claim = gw.claim(r["intent_id"])
+@@ -226,6 +231,7 @@ class TestTC05CrashBeforeReceipt(unittest.TestCase):
+     def test_non_final_query_keeps_unknown(self):
+         """查询不满足最终性：查无不能作为未生效依据，维持 UNKNOWN 并保留占用。"""
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote(final_query_guarantee=False)
+         remote.query_by_key = lambda key: None  # 模拟最终一致索引暂不可见
+         r = prepare(gw, 0)
+@@ -246,6 +252,7 @@ class TestTC06LeaseExpiry(unittest.TestCase):
+     def test_keyed_dedup_no_duplicate_effect(self):
+         """崩溃在开始记录之后、真正发出之前：对账判未生效后按同键安全重试。"""
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         remote = FakeKeyedRemote()
+         r = prepare(gw, 0)
+         claim = gw.claim(r["intent_id"])
+@@ -262,6 +269,7 @@ class TestTC06LeaseExpiry(unittest.TestCase):
+     def test_no_contract_refuses_redispatch(self):
+         """无幂等契约：默认暂停自动重发（E604），保留 UNKNOWN 边界。"""
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload(idempotency_contract={
+             "mode": "NONE", "retry_policy": {"max": 3}})
+         r = prepare(gw, 0, payload=p)
+@@ -287,6 +295,7 @@ class TestPreconditionGate(unittest.TestCase):
+ 
+     def test_stale_precondition_blocks_prepare_and_dispatch(self):
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         head = 0
+         obs = svc.observe(WS, {
+             "source": {"connector_identity": "web.fetch@v2",
+@@ -330,6 +339,7 @@ class TestBudgetGrantIntegration(unittest.TestCase):
+ 
+     def test_budget_shortage_rolls_back_everything(self):
+         conn, svc, ledger, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         p = intent_payload()
+         grant = issue_grant_for(auth, p, head=0)
+         other = Ledger(conn)
+diff --git a/asg_kernel/tests/test_phase_c.py b/asg_kernel/tests/test_phase_c.py
+index 46cd566..eff68a6 100644
+--- a/asg_kernel/tests/test_phase_c.py
++++ b/asg_kernel/tests/test_phase_c.py
+@@ -73,6 +73,7 @@ class TestTC01InvalidationPrecision(unittest.TestCase):
+ 
+     def test_partial_withdraw_keeps_independent_support(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://a.example/1")
+         o2 = observe(svc, url="https://a.example/2")
+         o3 = observe(svc, url="https://b.example/3")
+@@ -106,6 +107,7 @@ class TestTC02ContestedNotOverwritten(unittest.TestCase):
+ 
+     def test_contested_state_surfaces(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://old.example/spec")
+         c2 = make_claim(svc)
+         justify(svc, WS, c2, [[o1]], expected_head=head_of(conn))
+@@ -130,6 +132,7 @@ class TestTC08LineageNotIndependent(unittest.TestCase):
+ 
+     def test_copies_share_root(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         root = observe(svc, url="https://origin.example/post")
+         c1 = observe(svc, url="https://mirror1.example/x",
+                      refs=[{"role": "extracted_from", "target_record_id": root}])
+@@ -155,6 +158,7 @@ class TestPropagationTaskReeval(unittest.TestCase):
+ 
+     def test_task_moves_to_pending_reevaluation(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://a.example/plan-input")
+         task_obj = "task-" + uuid7()
+         tp = {"task_object_id": task_obj, "goal": "整理数据说明",
+@@ -195,6 +199,7 @@ class TestTC10StaleGate(unittest.TestCase):
+ 
+     def test_unrelated_pending_invalidation_blocks_dispatch(self):
+         conn, svc, _, auth, gw = make_stack()
++        self.addCleanup(conn.close)
+         o_pre = observe(svc, url="https://a.example/pre")
+         o_other = observe(svc, url="https://b.example/other")
+         iid = self._prepare_intent(conn, auth, gw, [o_pre])
+@@ -214,6 +219,7 @@ class TestTC10StaleGate(unittest.TestCase):
+ 
+     def test_exploratory_read_returns_stale_annotation(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://a.example/x")
+         o2 = observe(svc, url="https://b.example/y")
+         svc.invalidate(WS, o2, "corrected", head_of(conn), "req-" + uuid7(), AGENT)
+@@ -226,6 +232,7 @@ class TestTC09ContextBudget(unittest.TestCase):
+ 
+     def test_required_over_budget_rejected(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         c_a = make_claim(svc, data_labels=["internal"])
+         with self.assertRaises(AsgError) as cm:
+             project_context(conn, svc, WS, required_ids=[c_a], candidate_ids=[],
+@@ -236,6 +243,7 @@ class TestTC09ContextBudget(unittest.TestCase):
+ 
+     def test_manifest_persisted_with_labels_and_omissions(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         c_req = make_claim(svc, data_labels=["internal"])
+         c_big = make_claim(svc, data_labels=["sensitive:pii"],
+                            constrained_text="超长候选" * 200)
+@@ -265,6 +273,7 @@ class TestTC07PurgeRevival(unittest.TestCase):
+ 
+     def test_purge_blocks_read_and_revival(self):
+         conn, svc, _, _, _ = make_stack()
++        self.addCleanup(conn.close)
+         o1 = observe(svc, url="https://secret.example/page")
+         c1 = make_claim(svc)
+         justify(svc, WS, c1, [[o1]], expected_head=head_of(conn))
+diff --git a/asg_kernel/tests/test_state_machine_combinations.py b/asg_kernel/tests/test_state_machine_combinations.py
+index cdf6c38..6bb476e 100644
+--- a/asg_kernel/tests/test_state_machine_combinations.py
++++ b/asg_kernel/tests/test_state_machine_combinations.py
+@@ -1,4 +1,4 @@
+-"""状态机组合测试 —— 随机轨迹下的不变量（阶段 D 准入前的最后一层）。
++"""状态机组合测试 —— 随机轨迹下的不变量（有限执行模型）。
+ 
+ 用固定种子生成 Attempt 回执序列、租约过期与迟到回执的交错，
+ 每一步之后检查全局不变量。失败时输出种子与事件序列，可复现。
+@@ -16,6 +16,7 @@ from __future__ import annotations
+ 
+ import random
+ import unittest
++from unittest.mock import patch
+ 
+ from asg import (AsgError, Authorizer, Gateway, Ledger, WriteService,
+                  compute_operation_digest, connect, init_schema)
+@@ -99,9 +100,16 @@ def check_invariants(conn, ledger, state_history, calls_at_success, remote) -> l
+     return bad
+ 
+ 
+-def run_trajectory(seed: int, steps: int = 12) -> list[str]:
++def run_trajectory(seed: int, steps: int = 12, coverage: dict | None = None) -> list[str]:
+     rng = random.Random(seed)
+     conn = connect()
++    try:
++        return _run_trajectory(conn, rng, seed, steps, coverage)
++    finally:
++        conn.close()
++
++
++def _run_trajectory(conn, rng, seed, steps, coverage):
+     init_schema(conn)
+     svc = WriteService(conn)
+     ledger = Ledger(conn)
+@@ -120,23 +128,23 @@ def run_trajectory(seed: int, steps: int = 12) -> list[str]:
+         "arguments_ref": {"arguments": {"n": seed}}, "artifact_revision_ids": [],
+         "precondition_refs": [], "idempotency_contract": contract,
+     }
+-    h = conn.execute("SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?",
+-                     (WS,)).fetchone()
+     g = auth.issue_grant(WS, APPROVER, AGENT, compute_operation_digest(payload),
+                          "提交", FAR, [DEST], use_limit=rng.choice([1, 3]), expected_head=0)
+     try:
+         gw.prepare_effect(WS, payload, 1, "req-" + uuid7(), g["grant_id"],
+                           [{"resource_key": "ws:compute.gpu", "amount": AMOUNT}])
+-    except AsgError:
+-        return []
++    except AsgError as error:
++        return [f"seed={seed} prepare failed: {error.code}: {error}"]
+     iid = payload["intent_id"]
+     remote = RandomRemote(rng, mode)
+ 
+     history: list[tuple] = []
+     calls_at_success = None
+     events = ["run", "run", "expire", "due", "late"]
++    trace = []
+     for _ in range(steps):
+         event = rng.choice(events)
++        trace.append(event)
+         try:
+             if event == "expire":
+                 conn.execute("UPDATE effect_outbox SET claim_expires_at='2000-01-01T00:00:00Z'"
+@@ -154,8 +162,12 @@ def run_trajectory(seed: int, steps: int = 12) -> list[str]:
+                                         "external_job_id": remote.job, "clause": "late"})
+             else:
+                 gw.run_once(iid, remote)
+-        except AsgError:
+-            pass  # 拒绝本身是合法结果，不变量仍须成立
++        except AsgError as error:
++            # Only modelled lease/conflict/reconciliation rejections are allowed.
++            if error.code not in {"E201", "E603", "E604", "E605", "E606"}:
++                return [f"seed={seed} mode={mode} trace={trace} unexpected: {error.code}: {error}"]
++        if coverage is not None:
++            coverage["steps"] = coverage.get("steps", 0) + 1
+         eff = conn.execute("SELECT state FROM effect_state WHERE intent_id=?",
+                            (iid,)).fetchone()
+         bal = ledger.balance("ws:compute.gpu")
+@@ -164,18 +176,33 @@ def run_trajectory(seed: int, steps: int = 12) -> list[str]:
+             calls_at_success = remote.calls
+         bad = check_invariants(conn, ledger, history, calls_at_success, remote)
+         if bad:
+-            conn.close()
+-            return [f"seed={seed} mode={mode} event={event}"] + bad
+-    conn.close()
++            return [f"seed={seed} mode={mode} trace={trace}"] + bad
++    if coverage is not None:
++        coverage["trajectories"] = coverage.get("trajectories", 0) + 1
++        coverage[mode] = coverage.get(mode, 0) + 1
++        coverage["calls"] = coverage.get("calls", 0) + remote.calls
+     return []
+ 
+ 
+ class TestRandomTrajectories(unittest.TestCase):
+     def test_invariants_over_random_trajectories(self):
+-        failures = []
++        failures, coverage = [], {}
+         for seed in range(60):
+-            failures.extend(run_trajectory(seed))
++            failures.extend(run_trajectory(seed, coverage=coverage))
+         self.assertFalse(failures, "\n".join(failures[:12]))
++        self.assertEqual(coverage["trajectories"], 60)
++        self.assertEqual(coverage["steps"], 720)
++        self.assertGreater(coverage["KEYED"], 0)
++        self.assertGreater(coverage["QUERY_ONLY"], 0)
++        self.assertGreater(coverage["calls"], 0)
++
++    def test_setup_failure_cannot_pass_vacuously(self):
++        with patch.object(Gateway, "prepare_effect", side_effect=AsgError("E101", "injected")):
++            self.assertIn("prepare failed", run_trajectory(0)[0])
++
++    def test_unexpected_event_error_is_reported(self):
++        with patch.object(Gateway, "run_once", side_effect=AsgError("E101", "injected")):
++            self.assertIn("unexpected: E101", run_trajectory(0, steps=100)[0])
+ 
+ 
+ if __name__ == "__main__":

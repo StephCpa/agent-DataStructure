@@ -1,9 +1,7 @@
 """阶段 D 第一层：ASG 与简单基线在同一批故障场景上的对比。
 
-场景取自说明书第 13.3 节的对抗清单。每个场景对两个系统施加相同操作序列，
-断言 ASG 满足契约；基线按“消息列表 + 就地覆盖 + 名称级授权 + 盲目重试”
-的固有行为失败。基线的失败是预期结果，用来说明结构带来的差异，
-不是待修复缺陷。
+场景取自说明书第 13.3 节的对抗清单。朴素对照显式缺少待测机制，
+失败只能证明场景能检出这些机制缺失，不是成熟工作流的收益比较。
 """
 from __future__ import annotations
 
@@ -29,6 +27,9 @@ class TestStaleEvidenceBlocksAction(unittest.TestCase):
                 system.withdraw(obs)
                 executed = system.act(grant, "config-v1", [claim])
                 self.assertEqual(executed, not expect_blocked)
+                self.assertEqual(system.remote.calls, 0 if expect_blocked else 1)
+                if expect_blocked:
+                    self.assertEqual(system.last_error, "E401")
                 system.close()
 
 
@@ -57,6 +58,9 @@ class TestGrantBindsContent(unittest.TestCase):
                 grant = system.grant("config-v7")
                 executed = system.act(grant, "config-v8", [])
                 self.assertEqual(executed, expect_allowed)
+                self.assertEqual(system.remote.calls, 1 if expect_allowed else 0)
+                if not expect_allowed:
+                    self.assertEqual(system.last_error, "E402")
                 system.close()
 
 
@@ -115,6 +119,18 @@ class TestReplay(unittest.TestCase):
                 system.task("整理数据说明", obs)
                 system.withdraw(obs)
                 self.assertEqual(system.replay_consistent(), expect)
+                system.close()
+
+
+class TestHealthyControl(unittest.TestCase):
+    def test_valid_action_reaches_remote_in_both_systems(self):
+        for system in systems():
+            try:
+                obs = system.observe("https://healthy/source")
+                claim = system.claim("valid fact", [obs])
+                self.assertTrue(system.act(system.grant("config-v1"), "config-v1", [claim]))
+                self.assertEqual(system.remote.calls, 1)
+            finally:
                 system.close()
 
 

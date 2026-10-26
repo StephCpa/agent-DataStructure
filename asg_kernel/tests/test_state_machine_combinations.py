@@ -1,4 +1,4 @@
-"""状态机组合测试 —— 随机轨迹下的不变量（阶段 D 准入前的最后一层）。
+"""状态机组合测试 —— 随机轨迹下的不变量（有限执行模型）。
 
 用固定种子生成 Attempt 回执序列、租约过期与迟到回执的交错，
 每一步之后检查全局不变量。失败时输出种子与事件序列，可复现。
@@ -8,7 +8,7 @@ S1 账本恒等：reserved = Σ(reserved+uncertain)，committed = Σ(committed)�
    且 reserved、committed 非负、两者之和不超过额度。
 S2 committed 单调不减。
 S3 CONFIRMED_SUCCEEDED 一旦到达不再离开。
-S4 离开 CONFIRMED_NOT_APPLIED 只能走向带冲突标记的状态。
+S4 无新增 Attempt 时，离开 CONFIRMED_NOT_APPLIED 必须有冲突标记；正常重试须有新 Attempt。
 S5 确认成功后不再产生新的外部调用。
 S6 授权占用次数不超过 use_limit。
 """
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import random
 import unittest
+from unittest.mock import patch
 
 from asg import (AsgError, Authorizer, Gateway, Ledger, WriteService,
                  compute_operation_digest, connect, init_schema)
@@ -81,7 +82,7 @@ def check_invariants(conn, ledger, state_history, calls_at_success, remote) -> l
         bad.append(f"S1 额度越界 {bal}")
     if len(state_history) >= 2 and bal["committed"] + 1e-6 < state_history[-2][1]:
         bad.append("S2 committed 下降")
-    states = [s for s, _ in state_history]
+    states = [entry[0] for entry in state_history]
     if "CONFIRMED_SUCCEEDED" in states:
         first = states.index("CONFIRMED_SUCCEEDED")
         if any(s != "CONFIRMED_SUCCEEDED" for s in states[first:]):
@@ -91,7 +92,8 @@ def check_invariants(conn, ledger, state_history, calls_at_success, remote) -> l
     if len(states) >= 2 and states[-2] == "CONFIRMED_NOT_APPLIED" \
             and states[-1] != "CONFIRMED_NOT_APPLIED":
         reason = conn.execute("SELECT unresolved_reason FROM effect_state").fetchone()
-        if not reason or "conflict" not in (reason["unresolved_reason"] or ""):
+        new_attempt = state_history[-1][2] > state_history[-2][2]
+        if not new_attempt and (not reason or "conflict" not in (reason["unresolved_reason"] or "")):
             bad.append(f"S4 未生效态无冲突标记地离开 -> {states[-1]}")
     g = conn.execute("SELECT uses_consumed, use_limit FROM grant_record").fetchone()
     if g and g["uses_consumed"] > g["use_limit"]:
@@ -99,9 +101,16 @@ def check_invariants(conn, ledger, state_history, calls_at_success, remote) -> l
     return bad
 
 
-def run_trajectory(seed: int, steps: int = 12) -> list[str]:
+def run_trajectory(seed: int, steps: int = 12, coverage: dict | None = None) -> list[str]:
     rng = random.Random(seed)
     conn = connect()
+    try:
+        return _run_trajectory(conn, rng, seed, steps, coverage)
+    finally:
+        conn.close()
+
+
+def _run_trajectory(conn, rng, seed, steps, coverage):
     init_schema(conn)
     svc = WriteService(conn)
     ledger = Ledger(conn)
@@ -120,23 +129,23 @@ def run_trajectory(seed: int, steps: int = 12) -> list[str]:
         "arguments_ref": {"arguments": {"n": seed}}, "artifact_revision_ids": [],
         "precondition_refs": [], "idempotency_contract": contract,
     }
-    h = conn.execute("SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?",
-                     (WS,)).fetchone()
     g = auth.issue_grant(WS, APPROVER, AGENT, compute_operation_digest(payload),
                          "提交", FAR, [DEST], use_limit=rng.choice([1, 3]), expected_head=0)
     try:
         gw.prepare_effect(WS, payload, 1, "req-" + uuid7(), g["grant_id"],
                           [{"resource_key": "ws:compute.gpu", "amount": AMOUNT}])
-    except AsgError:
-        return []
+    except AsgError as error:
+        return [f"seed={seed} prepare failed: {error.code}: {error}"]
     iid = payload["intent_id"]
     remote = RandomRemote(rng, mode)
 
     history: list[tuple] = []
     calls_at_success = None
     events = ["run", "run", "expire", "due", "late"]
+    trace = []
     for _ in range(steps):
         event = rng.choice(events)
+        trace.append(event)
         try:
             if event == "expire":
                 conn.execute("UPDATE effect_outbox SET claim_expires_at='2000-01-01T00:00:00Z'"
@@ -154,28 +163,48 @@ def run_trajectory(seed: int, steps: int = 12) -> list[str]:
                                         "external_job_id": remote.job, "clause": "late"})
             else:
                 gw.run_once(iid, remote)
-        except AsgError:
-            pass  # 拒绝本身是合法结果，不变量仍须成立
+        except AsgError as error:
+            # Only modelled lease/conflict/reconciliation rejections are allowed.
+            if error.code not in {"E201", "E603", "E604", "E605", "E606"}:
+                return [f"seed={seed} mode={mode} trace={trace} unexpected: {error.code}: {error}"]
+        if coverage is not None:
+            coverage["steps"] = coverage.get("steps", 0) + 1
         eff = conn.execute("SELECT state FROM effect_state WHERE intent_id=?",
                            (iid,)).fetchone()
         bal = ledger.balance("ws:compute.gpu")
-        history.append((eff["state"] if eff else None, bal["committed"]))
+        attempts = conn.execute("SELECT COUNT(*) FROM attempt WHERE intent_id=?", (iid,)).fetchone()[0]
+        history.append((eff["state"] if eff else None, bal["committed"], attempts))
         if eff and eff["state"] == "CONFIRMED_SUCCEEDED" and calls_at_success is None:
             calls_at_success = remote.calls
         bad = check_invariants(conn, ledger, history, calls_at_success, remote)
         if bad:
-            conn.close()
-            return [f"seed={seed} mode={mode} event={event}"] + bad
-    conn.close()
+            return [f"seed={seed} mode={mode} trace={trace}"] + bad
+    if coverage is not None:
+        coverage["trajectories"] = coverage.get("trajectories", 0) + 1
+        coverage[mode] = coverage.get(mode, 0) + 1
+        coverage["calls"] = coverage.get("calls", 0) + remote.calls
     return []
 
 
 class TestRandomTrajectories(unittest.TestCase):
     def test_invariants_over_random_trajectories(self):
-        failures = []
+        failures, coverage = [], {}
         for seed in range(60):
-            failures.extend(run_trajectory(seed))
+            failures.extend(run_trajectory(seed, coverage=coverage))
         self.assertFalse(failures, "\n".join(failures[:12]))
+        self.assertEqual(coverage["trajectories"], 60)
+        self.assertEqual(coverage["steps"], 720)
+        self.assertGreater(coverage["KEYED"], 0)
+        self.assertGreater(coverage["QUERY_ONLY"], 0)
+        self.assertGreater(coverage["calls"], 0)
+
+    def test_setup_failure_cannot_pass_vacuously(self):
+        with patch.object(Gateway, "prepare_effect", side_effect=AsgError("E101", "injected")):
+            self.assertIn("prepare failed", run_trajectory(0)[0])
+
+    def test_unexpected_event_error_is_reported(self):
+        with patch.object(Gateway, "run_once", side_effect=AsgError("E101", "injected")):
+            self.assertIn("unexpected: E101", run_trajectory(0, steps=100)[0])
 
 
 if __name__ == "__main__":

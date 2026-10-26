@@ -1,11 +1,9 @@
 """阶段 D 第一层的两个被测系统（说明书 13.1 节：确定性记录 + 假工具）。
 
 - AsgSystem：包装 asg 内核。
-- BaselineSystem：消息列表 + 事实就地覆盖 + 操作名称级授权 + 盲目重试的 outbox
-  + 软删除。这是说明书第 3 章候选表里“消息数组加摘要”与“成熟工作流加
-  SQL 版本和 outbox”的最小组合，故意保留这些方案被 ASG 针对的缺陷：
-  新消息覆盖旧事实、授权不绑定内容、未知结果直接重发、删除可被旧副本复活、
-  预算先读后写。
+- BaselineSystem：显式关闭依赖、内容绑定、对账、删除域和原子额度检查的朴素对照。
+  它用于检查场景是否能检出这些缺失机制，不代表成熟工作流、SQL 或 outbox。
+  当前结果不能用于推断 ASG 相对这些系统的收益。
 """
 from __future__ import annotations
 
@@ -70,6 +68,7 @@ class AsgSystem:
         self.ledger.ensure_budget(BUDGET_KEY, 100)
         self._grants: dict[str, str] = {}
         self._intent: str | None = None
+        self.last_error: str | None = None
 
     def _head(self) -> int:
         row = self.conn.execute(
@@ -122,18 +121,25 @@ class AsgSystem:
         return g["grant_id"]
 
     def act(self, grant_id: str, content: str, preconditions: list[str]) -> bool:
+        self.last_error = None
         payload = self._payload(content, preconditions)
         try:
             res = self.gw.prepare_effect(WS, payload, self._head(), "req-" + uuid7(),
                                          grant_id, [{"resource_key": BUDGET_KEY, "amount": 10}])
-        except AsgError:
+        except AsgError as error:
+            if error.code not in {"E401", "E402", "E403", "E501"}:
+                raise
+            self.last_error = error.code
             return False
         self._intent = res["intent_id"]
         try:
-            self.gw.run_once(self._intent, self.remote)
-        except AsgError:
+            result = self.gw.run_once(self._intent, self.remote)
+        except AsgError as error:
+            if error.code not in {"E401", "E402", "E403"}:
+                raise
+            self.last_error = error.code
             return False
-        return True
+        return result is not None and result["state"] == "CONFIRMED_SUCCEEDED"
 
     def start_and_crash(self, grant_id: str, content: str) -> None:
         """外部调用已成功，但回执持久化前崩溃（租约过期）。"""
@@ -188,7 +194,9 @@ class AsgSystem:
             self.ledger.reserve(WS, "intent-" + uuid7(),
                                 [{"resource_key": BUDGET_KEY, "amount": amount}])
             return True
-        except AsgError:
+        except AsgError as error:
+            if error.code != "E501":
+                raise
             return False
 
     def replay_consistent(self) -> bool:
@@ -208,6 +216,7 @@ class BaselineSystem:
         self.facts: dict[str, str] = {}          # claim -> SUPPORTED / OVERWRITTEN
         self.grants: dict[str, str] = {}         # grant -> 操作名（不绑定内容）
         self.pending = False
+        self.pending_arguments: dict = {}
         self.limit = 100.0
         self.used = 0.0
         self._snap: float | None = None
@@ -239,15 +248,19 @@ class BaselineSystem:
         return gid
 
     def act(self, grant_id: str, content: str, preconditions: list[str]) -> bool:
-        return grant_id in self.grants           # 不核对内容，不检查前提
+        if grant_id not in self.grants:
+            return False
+        self.remote.call("compute.job.submit", {"config": content}, None)
+        return True                             # 不核对内容，不检查前提
 
     def start_and_crash(self, grant_id: str, content: str) -> None:
         self.remote.call("compute.job.submit", {"config": content}, None)
+        self.pending_arguments = {"config": content}
         self.pending = True                      # 没有结果记录，只知道“还没确认”
 
     def recover(self) -> str:
         if self.pending:                         # 盲目重发
-            self.remote.call("compute.job.submit", {}, None)
+            self.remote.call("compute.job.submit", self.pending_arguments, None)
             self.pending = False
         return "RETRIED"
 

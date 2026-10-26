@@ -13,7 +13,7 @@
 from .errors import AsgError, ERROR_NAMES
 from .ids import uuid7, digest_obj, canonical_json
 from .ledger import Ledger, reserve_in_txn, settle_in_txn
-from .projection import Projection, reducer_v1
+from .projection import Projection, reducer_v1, reducer_v2
 from .storage import connect, init_schema, write_txn
 from .write_service import WriteService
 from .authorize import Authorizer, compute_operation_digest
@@ -26,7 +26,7 @@ from .purge import Purger
 __all__ = [
     "AsgError", "ERROR_NAMES", "uuid7", "digest_obj", "canonical_json",
     "Ledger", "reserve_in_txn", "settle_in_txn",
-    "Projection", "reducer_v1", "connect", "init_schema", "write_txn",
+    "Projection", "reducer_v1", "reducer_v2", "connect", "init_schema", "write_txn",
     "WriteService", "Authorizer", "compute_operation_digest",
     "Gateway", "Connector", "ConnectorContract",
     "process_queue", "read_gate", "watermark", "marks_on",

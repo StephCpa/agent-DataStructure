@@ -15,7 +15,7 @@ import sqlite3
 from .errors import AsgError
 from .ids import uuid7
 
-DEFAULT_BUDGET = {"max_paths": 16, "max_depth": 8, "max_recompute": 512}
+DEFAULT_BUDGET = {"max_paths": 16, "max_depth": 8, "max_recompute": 512, "max_group_width": 64}
 
 FOUR_STATE = {
     (False, False): "NONE",
@@ -30,7 +30,8 @@ LINEAGE_ROLES = ("derived_from", "extracted_from", "transcribed_from")
 def justify(svc, workspace_id: str, claim_record_id: str,
             support_groups: list[list[str]], refute_groups: list[list[str]] | None = None,
             rule_refs: list[str] | None = None, assumption_refs: list[str] | None = None,
-            expected_head: int = 0, principal: dict | None = None) -> dict:
+            expected_head: int = 0, principal: dict | None = None,
+            object_id: str | None = None, supersedes: str | None = None) -> dict:
     """登记 Justification（3.6 节）。refute_groups 与 support_groups 同构：OR of AND。"""
     refute = refute_groups or []
     payload = {
@@ -46,17 +47,19 @@ def justify(svc, workspace_id: str, claim_record_id: str,
             + [{"role": "uses_version", "target_record_id": r} for r in (rule_refs or [])]
             # 假设与目标主张也入引用图：撤回它们时失效传播能到达本论证（7.3 节）
             + [{"role": "uses_version", "target_record_id": a} for a in (assumption_refs or [])]
-            + [{"role": "supports", "target_record_id": claim_record_id}])
+            + [{"role": "targets_claim", "target_record_id": claim_record_id}])
+    if supersedes:
+        refs.append({"role": "supersedes", "target_record_id": supersedes})
     record = {
         "workspace_id": workspace_id,
-        "object_id": "just-" + uuid7(),
+        "object_id": object_id or "just-" + uuid7(),
         "kind": "JUSTIFICATION",
         "schema_version": 1,
         "authenticated_writer": principal or {"kind": "service", "id": "read-service"},
         "policy_domain": "default",
         "payload": payload,
         "typed_refs": refs,
-        "prior_revision_ids": [],
+        "prior_revision_ids": [supersedes] if supersedes else [],
     }
     return svc.submit_proposal(workspace_id, [record], expected_head,
                                "req-" + uuid7(), principal=principal)
@@ -78,115 +81,191 @@ def root_source(conn: sqlite3.Connection, record_id: str) -> str:
     return current  # 防御：异常环路时返回当前节点
 
 
-def _retired_roots(conn, workspace_id: str) -> set[str]:
-    return {r["root_record_id"] for r in conn.execute(
-        "SELECT root_record_id FROM invalidation_queue WHERE workspace_id=?", (workspace_id,)
-    ).fetchall()}
+def _retired_roots(conn, workspace_id, as_of):
+    return {json.loads(r["payload"])["target"]["record_id"] for r in conn.execute(
+        "SELECT payload FROM record WHERE workspace_id=? AND kind='RETIRE_PURGE_MARK'"
+        " AND sequence<=?", (workspace_id, as_of))}
 
 
-def _marked(conn, workspace_id: str, record_id: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM invalidation_mark WHERE workspace_id=? AND record_id=?",
-        (workspace_id, record_id),
-    ).fetchone() is not None
+class _Evaluation:
+    """One request, one shared budget. Cache hits cost zero recompute units.
 
-
-def _purged(conn, record_id: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM tombstone WHERE record_id=? AND mode='purge'", (record_id,)
-    ).fetchone() is not None
-
-
-def eligible(conn, workspace_id: str, record_id: str, as_of: int | None = None,
-             _stack: tuple = ()) -> bool:
-    """证据资格：版本存在于 as_of 之前，未被撤回/标记/删除。
-
-    主张成员递归求值：作为支持成员的 Claim 只有自身正向支持成立才合格
-    （评审反例：O→C1→C2 撤回 O 后 C2 仍 SUPPORTED）。循环引用不凭空产生支持。
+    A unit is one uncached record inspection or one AND group visit.
+    max_paths counts group visits across both polarities and all child claims.
+    max_depth counts nested evidence edges below the root (root depth = 0).
+    SQL enumeration/IO and provenance reporting are not wall-clock budgets.
     """
-    row = conn.execute("SELECT sequence, kind FROM record WHERE record_id=?",
-                       (record_id,)).fetchone()
-    if row is None:
-        return False
-    if as_of is not None and row["sequence"] > as_of:
-        return False
-    if record_id in _retired_roots(conn, workspace_id):
-        return False
-    if _marked(conn, workspace_id, record_id):
-        return False
-    if _purged(conn, record_id):
-        return False
-    if row["kind"] == "CLAIM":
-        if record_id in _stack:  # 循环主张互引用不产生支持（3.6 节）
+    def __init__(self, conn, workspace_id, as_of, budget):
+        self.conn, self.ws = conn, workspace_id
+        head = conn.execute("SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?",
+                            (workspace_id,)).fetchone()
+        self.as_of = as_of if as_of is not None else (head[0] if head else 0)
+        self.limits = dict(DEFAULT_BUDGET)
+        for key, value in (budget or {}).items():
+            if key not in self.limits or type(value) is not int or value < 0:
+                raise AsgError("E101", f"Invalid evaluation budget: {key}={value!r}")
+            self.limits[key] = value
+        if self.limits["max_depth"] > 128:
+            raise AsgError("E101", "max_depth must not exceed the recursive implementation limit 128")
+        self.used = {"paths": 0, "recompute": 0, "max_depth": 0, "cache_hits": 0}
+        self.exhausted = set()
+        self.records, self.results = {}, {}
+        self.retired = _retired_roots(conn, workspace_id, self.as_of)
+        # Current deletion policy always applies, even to historical evaluation.
+        self.purged = {r[0] for r in conn.execute(
+            "SELECT record_id FROM tombstone WHERE workspace_id=? AND mode='purge'", (workspace_id,))}
+
+    def spend(self, name):
+        if self.used[name] >= self.limits["max_" + name]:
+            self.exhausted.add("max_" + name)
             return False
-        ev = evaluate_support(conn, workspace_id, record_id, as_of, _stack=_stack + (record_id,))
-        return ev["supported"] and not ev["refuted"]
-    return True
+        self.used[name] += 1
+        return True
+
+    def record(self, rid):
+        if rid in self.records:
+            self.used["cache_hits"] += 1
+            return self.records[rid]
+        if not self.spend("recompute"):
+            return None, False
+        row = self.conn.execute("SELECT * FROM record WHERE record_id=? AND workspace_id=?"
+                                " AND sequence<=?", (rid, self.ws, self.as_of)).fetchone()
+        rec = dict(row) if row else None
+        if rec:
+            rec["payload"] = json.loads(rec["payload"])
+        self.records[rid] = (rec, True)
+        return rec, True
+
+    def member(self, rid, depth, stack):
+        if depth > self.limits["max_depth"]:
+            self.exhausted.add("max_depth")
+            return None
+        self.used["max_depth"] = max(self.used["max_depth"], depth)
+        rec, complete = self.record(rid)
+        if not complete:
+            return None
+        if rec is None or rid in self.retired or rid in self.purged:
+            return False
+        if rid in stack:
+            self.exhausted.add("cycle")
+            return None
+        if rec["kind"] == "CLAIM":
+            result = self.claim(rid, depth, stack)
+            if result["truncated"]:
+                return None
+            return result["supported"] and not result["refuted"]
+        # Ancestry is checked synchronously, including before any queue drain.
+        parents = [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT dst_record_id FROM record_ref WHERE src_record_id=? AND ref_role IN"
+            " ('derived_from','extracted_from','transcribed_from','uses_version','depends_on','selected_into')"
+            " ORDER BY dst_record_id", (rid,))]
+        return self.conjunction(parents, depth, stack + (rid,))
+
+    def conjunction(self, members, depth, stack):
+        if len(members) > self.limits["max_group_width"]:
+            self.exhausted.add("max_group_width")
+            return None
+        unknown = False
+        for rid in members:
+            value = self.member(rid, depth + 1, stack)
+            if value is False:
+                return False
+            unknown |= value is None
+        return None if unknown else True
+
+    def claim(self, rid, depth=0, stack=()):
+        cache_key = (rid, depth)
+        if cache_key in self.results:
+            self.used["cache_hits"] += 1
+            return self.results[cache_key]
+        rec, complete = self.record(rid)
+        if not complete:
+            return self.result(rid, [], [], True, True, 0)
+        if (rec is None or rec["kind"] != "CLAIM" or rid in self.retired or rid in self.purged):
+            return self.result(rid, [], [], False, False, 0)
+        if depth > self.limits["max_depth"] or rid in stack:
+            self.exhausted.add("cycle" if rid in stack else "max_depth")
+            return self.result(rid, [], [], True, True, 0)
+        self.used["max_depth"] = max(self.used["max_depth"], depth)
+        paths = [[], []]
+        unknown = [False, False]
+        count = 0
+        # Select latest revision BEFORE testing retirement or target: never fall back.
+        justs = self.conn.execute(
+            "SELECT j.record_id FROM record j WHERE j.workspace_id=? AND j.kind='JUSTIFICATION'"
+            " AND j.sequence<=? AND json_extract(j.payload,'$.target_claim_id')=?"
+            " AND NOT EXISTS (SELECT 1 FROM record n WHERE n.workspace_id=j.workspace_id"
+            " AND n.object_id=j.object_id AND n.sequence<=?"
+            " AND (n.sequence>j.sequence OR (n.sequence=j.sequence AND n.rowid>j.rowid)))"
+            " ORDER BY j.sequence,j.rowid", (self.ws, self.as_of, rid, self.as_of))
+        for row in justs:
+            jid = row[0]
+            j, done = self.record(jid)
+            if not done:
+                unknown = [True, True]
+                break
+            if jid in self.retired or jid in self.purged:
+                continue
+            p = j["payload"]
+            prereq = self.conjunction(p.get("rule_refs", []) + p.get("assumption_refs", []),
+                                     depth, stack + (rid,))
+            if prereq is False:
+                continue
+            for side, name in enumerate(("support_groups", "refute_groups")):
+                for group in p.get(name, []):
+                    if not self.spend("paths"):
+                        unknown[side] = True
+                        break
+                    if not self.spend("recompute"):
+                        unknown[side] = True
+                        break
+                    count += 1
+                    value = self.conjunction(group, depth, stack + (rid,))
+                    if value is True and prereq is True:
+                        paths[side].append(list(group))
+                    elif value is not False:
+                        unknown[side] = True
+        result = self.result(rid, *paths, *unknown, count)
+        if not result["truncated"]:
+            self.results[cache_key] = result
+        return result
+
+    @staticmethod
+    def result(rid, supporting, refuting, unknown_s, unknown_r, count):
+        s, r = bool(supporting), bool(refuting)
+        incomplete = unknown_s or unknown_r
+        return {"claim": rid, "four_state": "INCOMPLETE" if incomplete else FOUR_STATE[(s, r)],
+                "supported": s, "refuted": r, "supporting_paths": supporting,
+                "refuting_paths": refuting, "groups_evaluated": count,
+                "support": "FOUND" if s else "UNKNOWN" if unknown_s else "ABSENT",
+                "refutation": "FOUND" if r else "UNKNOWN" if unknown_r else "ABSENT",
+                "evaluation_status": "INCOMPLETE" if incomplete else "COMPLETE",
+                "truncated": incomplete}
 
 
-def evaluate_support(conn, workspace_id: str, claim_record_id: str,
-                     as_of: int | None = None, budget: dict | None = None,
-                     _stack: tuple = ()) -> dict:
-    """支持电路求值（7.2 节，按论证独立求值）。
-
-    每个 Justification 是独立的逻辑论证：其规则与假设只约束自身的支持组，
-    论证自身被撤回则整条路径退出。不同论证之间为析取（评审反例：
-    撤回 J1 的规则不得使 J2 的独立支持消失；撤回论证自身不得继续提供支持）。
-    """
-    b = dict(DEFAULT_BUDGET)
-    b.update(budget or {})
-    if as_of is None:
-        row = conn.execute(
-            "SELECT head_sequence FROM workspace_epoch WHERE workspace_id=?", (workspace_id,)
-        ).fetchone()
-        as_of = row["head_sequence"] if row else 0
-
-    justs = conn.execute(
-        "SELECT record_id, payload FROM record WHERE workspace_id=? AND kind='JUSTIFICATION'"
-        " AND sequence<=? AND json_extract(payload, '$.target_claim_id')=?",
-        (workspace_id, as_of, claim_record_id),
-    ).fetchall()
-
-    supporting, refuting, evaluated, truncated = [], [], 0, False
-    for j in justs:
-        p = json.loads(j["payload"])
-        # 论证自身被撤回：整条路径退出。论证被标记只表示其依赖有变更，
-        # 成员资格在下方逐组重算——标记本身不使全部 OR 分支失效（TC-01 语义）
-        if j["record_id"] in _retired_roots(conn, workspace_id):
-            continue
-        # 规则与假设按论证独立合取（不跨论证合并）
-        prereq_ok = all(eligible(conn, workspace_id, r, as_of, _stack)
-                        for r in (p.get("rule_refs") or []) + (p.get("assumption_refs") or []))
-        if not prereq_ok:
-            continue
-        for groups, bucket in ((p.get("support_groups") or [], supporting),
-                               (p.get("refute_groups") or [], refuting)):
-            for g in groups:
-                if evaluated >= b["max_paths"] or len(g) > b["max_depth"]:
-                    truncated = True  # 超限不谎称完整证明（7.2 节）
-                    break
-                evaluated += 1
-                if all(eligible(conn, workspace_id, m, as_of, _stack) for m in g):
-                    bucket.append(list(g))
-
-    s = bool(supporting)
-    r = bool(refuting)
-    # 来源谱系：合格支持证据按根来源去重（TC-08）
-    roots = {root_source(conn, m) for g in supporting for m in g}
-
-    return {
-        "claim": claim_record_id,
-        "four_state": FOUR_STATE[(s, r)],
-        "supported": s,
-        "refuted": r,
-        "supporting_paths": supporting,
-        "refuting_paths": refuting,
-        "groups_evaluated": evaluated,
-        "truncated": truncated,
-        "independent_roots": sorted(roots),
-        "independent_root_count": len(roots),
-    }
+def eligible(conn, workspace_id, record_id, as_of=None, _stack=()):
+    evaluation = _Evaluation(conn, workspace_id, as_of, None)
+    return evaluation.member(record_id, 0, _stack) is True
 
 
-def claim_four_state(conn, workspace_id: str, claim_record_id: str) -> str:
+def eligible_new_task(conn, workspace_id, roots, as_of):
+    """Same depth and shared budget as member(task), before its immutable insert."""
+    evaluation = _Evaluation(conn, workspace_id, as_of, None)
+    if not evaluation.spend("recompute"):  # the new task's own record inspection
+        return False
+    return evaluation.conjunction(roots, 0, ()) is True
+
+
+def evaluate_support(conn, workspace_id, claim_record_id, as_of=None, budget=None, _stack=()):
+    evaluation = _Evaluation(conn, workspace_id, as_of, budget)
+    result = dict(evaluation.claim(claim_record_id, stack=_stack))
+    roots = {root_source(conn, m) for group in result["supporting_paths"] for m in group}
+    result.update(exhausted_budget=sorted(evaluation.exhausted), budget_used=dict(evaluation.used),
+                  lineage_rooted_support_items=sorted(roots),
+                  lineage_rooted_support_item_count=len(roots),
+                  support_provenance_scope="direct_members_with_explicit_lineage_only")
+    return result
+
+
+def claim_four_state(conn, workspace_id, claim_record_id):
     return evaluate_support(conn, workspace_id, claim_record_id)["four_state"]
